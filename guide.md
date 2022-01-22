@@ -1,6 +1,6 @@
 # Adventure
 
-In this RPG cog originally by locastan - TrustyJAID, Draper, and myself have crafted a fun idle game you can play with the members of your servers.
+In this RPG cog originally by locastan - TrustyJAID, Draper, and aikaterna have crafted a fun idle game you can play with the members of your servers.
 
 
 ## Basic Usage
