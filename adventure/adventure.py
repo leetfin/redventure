@@ -93,7 +93,7 @@ class Adventure(
             user_id
         ).clear()  # This will only ever touch the separate currency, leaving bot economy to be handled by core.
 
-    __version__ = "3.5.2"
+    __version__ = "3.5.3"
 
     def __init__(self, bot: Red):
         self.bot = bot

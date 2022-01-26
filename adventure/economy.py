@@ -23,7 +23,7 @@ log = logging.getLogger("red.cogs.adventure")
 
 
 class EconomyCommands(AdventureMixin):
-    """Commands for interacting with Adventures economy"""
+    """Commands for interacting with Adventure's economy"""
 
     @commands.group(name="atransfer")
     @has_separated_economy()
@@ -318,12 +318,11 @@ class EconomyCommands(AdventureMixin):
     # in economy since it affects the loot economy, might move later
     @commands.group()
     @commands.guild_only()
-    @commands.admin_or_permissions(manage_guild=True)
+    @commands.is_owner()
     async def give(self, ctx: commands.Context):
-        """[Admin] Commands to add things to players' inventories."""
+        """[Owner] Commands to add things to players' inventories."""
 
     @give.command(name="item")
-    @commands.is_owner()
     async def _give_item(self, ctx: commands.Context, user: discord.Member, item_name: str, *, stats: Stats):
         """[Owner] Adds a custom item to a specified member.
 
@@ -366,7 +365,6 @@ class EconomyCommands(AdventureMixin):
         )
 
     @give.command(name="loot")
-    @commands.is_owner()
     async def _give_loot(
         self, ctx: commands.Context, loot_type: str, users: commands.Greedy[discord.Member] = None, number: int = 1
     ):

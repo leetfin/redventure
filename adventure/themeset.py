@@ -36,6 +36,16 @@ class ThemesetCommands(AdventureMixin):
         """[Owner] Add/Update a monster object in the specified theme.
 
         Usage: `[p]themeset add monster theme++name++hp++dipl++pdef++mdef++cdef++boss++image`
+
+        `theme` is the one-word theme folder name. The default is `default`.
+        `name` is the name of the monster.
+        `hp` is the base amount of hp the monster has.
+        `dipl` is the base amount of charisma/diplomacy the monster has.
+        `pdef` is the percentage of physical resistance, `0.0` to `100.0`.
+        `mdef` is the percentage of magic resistance, `0.0` to `100.0`.
+        `cdef` is the percentage of charisma/diplomacy resistance, `0.0` to `100.0`.
+        `boss` is whether the monster is a boss, determined with `True` or `False`.
+        `image` is a URL for an image of the monster.
         """
         assert isinstance(theme_data, dict)
         theme = theme_data.pop("theme", None)
@@ -78,6 +88,13 @@ class ThemesetCommands(AdventureMixin):
         """[Owner] Add/Update a pet object in the specified theme.
 
         Usage: `[p]themeset add pet theme++name++bonus_multiplier++required_cha++crit_chance++always_crit`
+
+        `theme` is the one-word theme folder name. The default is `default`.
+        `name` is the name of the pet.
+        `bonus_multiplier` is a number between `1.00` and `2.00` for the reward bonus percentage on a successful adventure.
+        `required_cha` is the required charisma/diplomacy level that the ranger must overcome to catch the pet - usually between `1` and `500`.
+        `crit_chance` is the chance to have a critical strike, between `1` and `100` percent.
+        `always_crit` is `True` or `False` for whether the pet will always have a critical strike when attacking.
         """
         assert isinstance(pet_data, dict)
         theme = pet_data.pop("theme", None)
@@ -121,7 +138,10 @@ class ThemesetCommands(AdventureMixin):
 
     @themeset_delete.command(name="monster")
     async def themeset_delete_monster(self, ctx: commands.Context, theme: str, *, monster: str):
-        """[Owner] Remove a monster object in the specified theme."""
+        """[Owner] Remove a monster object in the specified theme.
+
+        The default theme is `default`.
+        """
         if theme != "default" and theme not in os.listdir(cog_data_path(self)):
             await smart_embed(ctx, _("That theme pack does not exist!"))
             return
@@ -142,7 +162,10 @@ class ThemesetCommands(AdventureMixin):
 
     @themeset_delete.command(name="pet")
     async def themeset_delete_pet(self, ctx: commands.Context, theme: str, *, pet: str):
-        """[Owner] Remove a pet object in the specified theme."""
+        """[Owner] Remove a pet object in the specified theme.
+
+        The default theme is `default`.
+        """
         if theme != "default" and theme not in os.listdir(cog_data_path(self)):
             await smart_embed(ctx, _("That theme pack does not exist!"))
             return
@@ -167,7 +190,11 @@ class ThemesetCommands(AdventureMixin):
 
     @themeset_list.command(name="monster")
     async def themeset_list_monster(self, ctx: commands.Context, *, theme: str):
-        """[Admin] Show monster objects in the specified theme."""
+        """[Admin] Show monster objects in the specified theme.
+
+        The default theme is `default`.
+        This will only display custom monsters added through the `themeset` command.
+        """
         if theme != "default" and theme not in os.listdir(cog_data_path(self)):
             await smart_embed(ctx, _("That theme pack does not exist!"))
             return
@@ -198,10 +225,16 @@ class ThemesetCommands(AdventureMixin):
                 clear_reactions_after=True,
                 timeout=60,
             ).start(ctx=ctx)
+        else:
+            await ctx.send(f"No custom monsters in the `{theme}` theme.")
 
     @themeset_list.command(name="pet")
     async def themeset_list_pet(self, ctx: commands.Context, *, theme: str):
-        """[Admin] Show pet objects in the specified theme."""
+        """[Admin] Show pet objects in the specified theme.
+
+        The default theme is `default`.
+        This will only display custom pets added through the `themeset` command.
+        """
         if theme != "default" and theme not in os.listdir(cog_data_path(self)):
             await smart_embed(ctx, _("That theme pack does not exist!"))
             return
@@ -228,3 +261,5 @@ class ThemesetCommands(AdventureMixin):
                 clear_reactions_after=True,
                 timeout=60,
             ).start(ctx=ctx)
+        else:
+            await ctx.send(f"No custom pets in the `{theme}` theme.")
