@@ -1,14 +1,18 @@
 # Adventure
 
-In this RPG cog originally by locastan - TrustyJAID, Draper, and aikaterna have crafted a fun idle game you can play with the members of your servers.
-
+Welcome to Adventure! This is a text-based RPG idle game that you play with other server members. It was originally created by [locastan](https://github.com/locastan/gobcog), and was greatly improved by [aikaterna](https://github.com/aikaterna/gobcog), TrustyJAID, and Draper. This fork was meant for use with Leet's bots, but will continually merge upstream patches and improvements.
 
 ## Basic Usage
 
-`[p]` in this readme represents your bot's command prefix. Whenever you see a command in this guide, you can receive more detailed help by using `[p]help` with the command name.
+`[p]` in this readme represents your bot's command prefix. For Cobalt, this prefix is `?`.
+Whenever you see a command in this guide, you can receive more detailed help by using `[p]help` followed by the command.
+Each command should be sent as it's own message.
 
-To start an adventure, use `[p]adventure` or `[p]a`. Reactions will appear underneath the text of the adventure randomly selected for your group. Use 🗡 to attack the monster, ✨ to use magic on the monster, 🗨 to talk with the monster, 🛐 to pray to the god Herbert (customizable). The more people helping the easier it is to defeat the monster and acquire its loot. 
+To start an adventure, use `[p]adventure` or `[p]a`. Reactions will appear underneath the text of the adventure randomly selected for your group. Use 🗡 to attack the monster, ✨ to use magic on the monster, 🗨 to talk with the monster, 🛐 to pray to the god Herbert (customizable). The more people helping the easier it is to defeat the monster and acquire its loot.
 
+### Quick Reference
+
+Coming Soon (TM)
 
 ## Hero/Heroclass
 
