@@ -1,8 +1,6 @@
 # Adventure
 
-In this RPG cog originally by locastan - TrustyJAID, Draper, and aikaterna have crafted a fun idle game you can play with the members of your servers.
-
-This fork is used for Cobalt bot, please report issues you encounter on Cobalt here.
+Welcome to Adventure! This is a text-based RPG idle game that you play with other server members. It was originally created by [locastan](https://github.com/locastan/gobcog), and was greatly improved by [aikaterna](https://github.com/aikaterna/gobcog), TrustyJAID, and Draper. This fork was meant for use with Leet's bots, but will continually merge upstream patches and improvements. If you have an issue with this cog on Cobalt, please report it here.
 
 See the [Guide](/guide.md) for information on how to play!
 
