@@ -395,7 +395,10 @@ class AdventureSetCommands(AdventureMixin):
     @adventureset.command()
     @commands.is_owner()
     async def theme(self, ctx: commands.Context, *, theme):
-        """[Owner] Change the theme for adventure."""
+        """[Owner] Change the theme for adventure.
+
+        The default theme is `default`.
+        """
         if theme == "default":
             await self.config.theme.set("default")
             await smart_embed(ctx, _("Going back to the default theme."))
@@ -419,7 +422,7 @@ class AdventureSetCommands(AdventureMixin):
             "suffixes.json",
             "set_bonuses.json",
         ]
-        missing_files = set(good_files).difference(os.listdir(cog_data_path(self) / theme))
+        missing_files = list(set(good_files).difference(os.listdir(cog_data_path(self) / theme)))
 
         if missing_files:
             await smart_embed(
