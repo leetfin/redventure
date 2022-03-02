@@ -4,6 +4,8 @@ In this RPG cog originally by locastan - TrustyJAID, Draper, and aikaterna have 
 
 This fork is used for Cobalt bot, please report issues you encounter on Cobalt here.
 
+See the [Guide](/guide.md) for information on how to play!
+
 
 ## Basic Usage
 
