@@ -2,6 +2,8 @@
 
 Welcome to Adventure! This is a text-based RPG idle game that you play with other server members. It was originally created by [locastan](https://github.com/locastan/gobcog), and was greatly improved by [aikaterna](https://github.com/aikaterna/gobcog), TrustyJAID, and Draper. This fork was meant for use with Leet's bots, but will continually merge upstream patches and improvements.
 
+I'd like to thank mneme and Lisa from the Arisia Year-Round Community Discord for writing major parts of this guide!
+
 ## Basic Usage
 
 `[p]` in this readme represents your bot's command prefix. For Cobalt, this prefix is `?`.
@@ -12,7 +14,25 @@ To start an adventure, use `[p]adventure` or `[p]a`. Reactions will appear under
 
 ### Quick Reference
 
-Coming Soon (TM)
+`[p]help Adventure` - See more information about commands
+`[p]stats` – View your character sheet
+`[p]a` – Summon forth a monster for the party to fight (short for `[p]adventure` which also works)
+`[p]backpack` – show me all the stuff I’m lugging around
+`[p]ebackpack` – show me the stuff that I can currently use (at my level)
+`[p]backpack` true or ?ebackpack true – show me the relative benefit of what I have vs. what I’ve got equipped
+`[p]equip [item name]` - take an item from my backpack and put it on my character (more on that later)
+`[p]apayday` – gets you some gold for free.
+
+## Creating a Character
+
+The easiest way to create a character is to do `[p]apayday` to get some gold, giving you the ability to join adventures.
+Once you’ve created a character, it’s associated with your account – you can’t have more than one.
+
+## Gold vs. Credits
+
+Gold is the currency used by the Adventure game, while credits is the bot-wide currency. You can transfer gold into credits and credits into gold.
+
+Gold comes mostly from winning combats and selling items – you’ll need it to buy items, and for certain events like changing your heroclass.
 
 ## Hero/Heroclass
 
