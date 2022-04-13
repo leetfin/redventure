@@ -339,12 +339,12 @@
         "miniboss": {},
         "color": ""
     },
-    "Ascended Troll Slave": {
+    "Ascended Annoying Pop Culture Troll": {
         "hp": 501.0,
         "pdef": 1.2,
         "mdef": 2.03,
         "dipl": 526.5,
-        "image": "https://cdn.pixabay.com/photo/2018/04/17/20/11/troll-3328570_960_720.png",
+        "image": "https://www.dreamworks.com/images/temp/explore/trolls/branch/troll-hero.png",
         "boss": false,
         "miniboss": {},
         "color": ""
@@ -419,7 +419,7 @@
         "miniboss": {},
         "color": ""
     },
-    "Ascended Orc Slavedriver": {
+    "Ascended Orc Brute": {
         "hp": 544.5,
         "pdef": 1.2,
         "mdef": 1.2,
