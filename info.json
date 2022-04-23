@@ -1,10 +1,10 @@
 {
-    "author" : ["locastan", "aikaterna", "TrustyJAID", "Draper"],
-    "install_msg" : "Thank you for trying out the adventure cog.",
+    "author" : ["locastan", "aikaterna", "TrustyJAID", "Draper", "Leet"],
+    "install_msg" : "Thank you for installing the adventure cog!",
     "name" : "Adventure",
-    "short" : "A fork of locastan's Goblins Adventure cog.",
+    "short" : "A fork of adventure for Cobalt.",
     "description" : "Play a RPG character and get loot by killing monsters.",
-    "min_python_version": [3, 6, 0],
+    "min_python_version": [3, 8, 1],
 	"tags": [
 		"rpg",
 		"adventure"
