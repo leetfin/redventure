@@ -754,7 +754,7 @@ class ClassAbilities(AdventureMixin):
                         if roll >= 0.8:
                             if cdef >= 1.5:
                                 msg += _(
-                                    "You think you are charismatic? Pfft, this creature couldn't care less for what you want to say!\n"
+                                    "You think you are charismatic? Pfft, this creature **couldn't care less** for what you want to say!\n"
                                 )
                             elif cdef >= 1.25:
                                 msg += _("Any attempts to communicate with this creature will be **very difficult!**\n")
