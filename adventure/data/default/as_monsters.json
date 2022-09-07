@@ -124,7 +124,7 @@
         "pdef": 1.51,
         "mdef": 1.2,
         "dipl": 508.5,
-        "image": "http://www.wizards.com/dnd/images/MM35_gallery/MM35_PG130.jpg",
+        "image": "https://upload.wikimedia.org/wikipedia/commons/2/2f/DnD_Gnoll.png",
         "boss": false,
         "miniboss": {},
         "color": ""
@@ -194,7 +194,7 @@
         "pdef": 1.13,
         "mdef": 29.47,
         "dipl": 549.5,
-        "image": "https://cdn.pixabay.com/photo/2015/07/02/10/44/crow-828944_960_720.jpg",
+        "image": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Bryce_Canyon_National_Park%2C_United_States_%28Unsplash_T5Ye7puWZxo%29.jpg/640px-Bryce_Canyon_National_Park%2C_United_States_%28Unsplash_T5Ye7puWZxo%29.jpg",
         "boss": false,
         "miniboss": {},
         "color": ""
@@ -1692,7 +1692,7 @@
         "pdef": 1.8,
         "mdef": 1.2,
         "dipl": 975.0,
-        "image": "https://barakabe.files.wordpress.com/2013/05/dragon5.jpg",
+        "image": "https://i.imgur.com/x8RIYvo.jpeg",
         "boss": true,
         "miniboss": {},
         "color": ""
