@@ -67,6 +67,10 @@ class AdventureMixin(ABC):
     #######################################################################
 
     @abstractmethod
+    def get_lock(self, member: discord.User) -> asyncio.Lock:
+        raise NotImplementedError()
+
+    @abstractmethod
     async def _clear_react(self, msg: discord.Message):
         raise NotImplementedError()
 
@@ -173,10 +177,6 @@ class AdventureMixin(ABC):
 
     @abstractmethod
     async def _adv_countdown(self, ctx: commands.Context, seconds, title) -> asyncio.Task:
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _cart_countdown(self, ctx: commands.Context, seconds, title, room=None) -> asyncio.Task:
         raise NotImplementedError()
 
     @abstractmethod
@@ -359,10 +359,6 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def _backpack_sell_button_action(self, ctx, emoji, page, item, price_shown, character):
-        raise NotImplementedError()
-
-    @abstractmethod
     async def backpack_trade(
         self,
         ctx: commands.Context,
@@ -406,22 +402,6 @@ class AdventureMixin(ABC):
 
     @abstractmethod
     async def commands_cbackpack_sell(self, ctx: commands.Context, *, query: BackpackFilterParser):
-        raise NotImplementedError()
-
-    #######################################################################
-    # cart.py                                                             #
-    #######################################################################
-
-    @abstractmethod
-    async def _handle_cart(self, reaction: discord.Reaction, user: discord.Member):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _trader(self, ctx: commands.Context, bypass=False):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _trader_get_items(self, howmany: int):
         raise NotImplementedError()
 
     #######################################################################

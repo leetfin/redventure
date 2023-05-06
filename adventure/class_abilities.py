@@ -4,21 +4,22 @@ import contextlib
 import logging
 import random
 import time
+from math import ceil
+from typing import Literal, Optional
 
 import discord
 from discord.ext.commands.errors import BadArgument
 from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize_number, humanize_timedelta
-from redbot.core.utils.menus import start_adding_reactions
-from redbot.core.utils.predicates import MessagePredicate, ReactionPredicate
+from redbot.core.utils.predicates import MessagePredicate
 
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
-from .constants import ORDER
-from .converters import ItemConverter
-from .helpers import escape, is_dev, smart_embed
+from .constants import ORDER, HeroClasses, Rarities
+from .converters import HeroClassConverter, ItemConverter
+from .helpers import ConfirmView, escape, is_dev, smart_embed
 from .menus import BaseMenu, SimpleSource
 
 _ = Translator("Adventure", __file__)
@@ -29,10 +30,13 @@ log = logging.getLogger("red.cogs.adventure")
 class ClassAbilities(AdventureMixin):
     """This class will handle class abilities"""
 
-    @commands.command(cooldown_after_parsing=True)
+    @commands.hybrid_command(cooldown_after_parsing=True)
     @commands.bot_has_permissions(add_reactions=True)
     @commands.cooldown(rate=1, per=7200, type=commands.BucketType.user)
-    async def heroclass(self, ctx: commands.Context, clz: str = None, action: str = None):
+    @discord.app_commands.rename(clz="class")
+    async def heroclass(
+        self, ctx: commands.Context, clz: Optional[HeroClassConverter] = None, action: Optional[Literal["info"]] = None
+    ):
         """Allows you to select a class if you are level 10 or above.
 
         For information on class use: `[p]heroclass classname info`.
@@ -44,294 +48,210 @@ class ClassAbilities(AdventureMixin):
             ctx.command.reset_cooldown(ctx)
             return await smart_embed(ctx, _("This command is not available in DM's on this bot."))
 
-        classes = {
-            "Wizard": {
-                "name": _("Wizard"),
-                "ability": False,
-                "desc": _(
-                    "Wizards have the option to focus and add large bonuses to their magic, "
-                    "but their focus can sometimes go astray...\n"
-                    "Use the focus command when attacking in an adventure."
-                ),
-                "cooldown": time.time(),
-            },
-            "Tinkerer": {
-                "name": _("Tinkerer"),
-                "ability": False,
-                "desc": _(
-                    "Tinkerers can forge two different items into a device "
-                    "bound to their very soul.\nUse the forge command."
-                ),
-                "cooldown": time.time(),
-            },
-            "Berserker": {
-                "name": _("Berserker"),
-                "ability": False,
-                "desc": _(
-                    "Berserkers have the option to rage and add big bonuses to attacks, "
-                    "but fumbles hurt.\nUse the rage command when attacking in an adventure."
-                ),
-                "cooldown": time.time(),
-            },
-            "Cleric": {
-                "name": _("Cleric"),
-                "ability": False,
-                "desc": _(
-                    "Clerics can bless the entire group when praying.\n"
-                    "Use the bless command when fighting in an adventure."
-                ),
-                "cooldown": time.time(),
-            },
-            "Ranger": {
-                "name": _("Ranger"),
-                "ability": False,
-                "desc": _(
-                    "Rangers can gain a special pet, which can find items and give "
-                    "reward bonuses.\nUse the pet command to see pet options."
-                ),
-                "pet": {},
-                "cooldown": time.time(),
-                "catch_cooldown": time.time(),
-            },
-            "Bard": {
-                "name": _("Bard"),
-                "ability": False,
-                "desc": _(
-                    "Bards can perform to aid their comrades in diplomacy.\n"
-                    "Use the music command when being diplomatic in an adventure."
-                ),
-                "cooldown": time.time(),
-            },
-            "Psychic": {
-                "name": _("Psychic"),
-                "ability": False,
-                "desc": _(
-                    "Psychics can show the enemy's weaknesses to their group "
-                    "allowing them to target the monster's weak-points.\n"
-                    "Use the insight command in an adventure."
-                ),
-                "cooldown": time.time(),
-            },
-        }
-
         if clz is None:
             ctx.command.reset_cooldown(ctx)
+            classes = box(
+                "\n".join(c.class_colour.as_str(c.class_name) for c in HeroClasses),
+                lang="ansi",
+            )
             await smart_embed(
                 ctx,
                 _(
                     "So you feel like taking on a class, {author}?\n"
-                    "Available classes are: Tinkerer, Berserker, "
-                    "Wizard, Cleric, Ranger, Psychic and Bard.\n"
+                    "Available classes are: {classes}\n"
                     "Use `{prefix}heroclass name-of-class` to choose one."
-                ).format(author=bold(ctx.author.display_name), prefix=ctx.prefix),
+                ).format(author=bold(ctx.author.display_name), classes=classes, prefix=ctx.prefix),
             )
 
         else:
-            clz = clz.title()
-            if clz in classes and action == "info":
+            if action == "info":
                 ctx.command.reset_cooldown(ctx)
-                return await smart_embed(ctx, f"{classes[clz]['desc']}")
-            elif clz not in classes:
-                ctx.command.reset_cooldown(ctx)
-                return await smart_embed(ctx, _("{} may be a class somewhere, but not on my watch.").format(clz))
-            elif clz in classes and action is None:
-                async with self.get_lock(ctx.author):
-                    bal = await bank.get_balance(ctx.author)
-                    currency_name = await bank.get_currency_name(
-                        ctx.guild,
-                    )
-                    if str(currency_name).startswith("<"):
-                        currency_name = "credits"
-                    spend = round(bal * 0.2)
-                    try:
-                        c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
-                    except Exception as exc:
-                        log.exception("Error with the new character sheet", exc_info=exc)
-                        ctx.command.reset_cooldown(ctx)
-                        return
-                    if c.heroclass["name"] == clz:
-                        ctx.command.reset_cooldown(ctx)
-                        return await smart_embed(ctx, _("You already are a {}.").format(clz))
-                    if clz == "Psychic" and c.rebirths < 20:
-                        ctx.command.reset_cooldown(ctx)
-                        return await smart_embed(ctx, _("You are too inexperienced to become a {}.").format(clz))
-                    class_msg = await ctx.send(
-                        box(
-                            _("This will cost {spend} {currency_name}. Do you want to continue, {author}?").format(
-                                spend=humanize_number(spend),
-                                currency_name=currency_name,
-                                author=escape(ctx.author.display_name),
-                            ),
-                            lang="css",
-                        )
-                    )
-                    broke = box(
-                        _("You don't have enough {currency_name} to train to be a {clz}.").format(
-                            currency_name=currency_name, clz=clz.title()
+                class_desc = clz.desc()
+                msg = box(clz.class_colour.as_str(class_desc), lang="ansi")
+                return await smart_embed(ctx, msg)
+            async with self.get_lock(ctx.author):
+                bal = await bank.get_balance(ctx.author)
+                currency_name = await bank.get_currency_name(
+                    ctx.guild,
+                )
+                if str(currency_name).startswith("<"):
+                    currency_name = "credits"
+                spend = round(bal * 0.2)
+                try:
+                    c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
+                except Exception as exc:
+                    log.exception("Error with the new character sheet", exc_info=exc)
+                    ctx.command.reset_cooldown(ctx)
+                    return
+                current_class = c.hc
+                if current_class is clz:
+                    ctx.command.reset_cooldown(ctx)
+                    return await smart_embed(ctx, _("You already are a {}.").format(clz.class_name))
+                if clz is HeroClasses.psychic and c.rebirths < 20:
+                    ctx.command.reset_cooldown(ctx)
+                    return await smart_embed(ctx, _("You are too inexperienced to become a {}.").format(clz.class_name))
+                view = ConfirmView(60, ctx.author)
+                class_msg = await ctx.send(
+                    box(
+                        _("This will cost {spend} {currency_name}. Do you want to continue, {author}?").format(
+                            spend=humanize_number(spend),
+                            currency_name=currency_name,
+                            author=escape(ctx.author.display_name),
                         ),
-                        lang="css",
+                        lang="ansi",
+                    ),
+                    view=view,
+                )
+                broke = box(
+                    _("You don't have enough {currency_name} to train to be a {clz}.").format(
+                        currency_name=currency_name, clz=clz.ansi(classes[clz.class_name]["name"])
+                    ),
+                    lang="ansi",
+                )
+                await view.wait()
+                if not view.confirmed:
+                    await class_msg.edit(
+                        content=box(
+                            _("{author} decided to continue being a {h_class}.").format(
+                                author=escape(ctx.author.display_name),
+                                h_class=current_class.ansi,
+                            ),
+                            lang="ansi",
+                        ),
+                        view=None,
                     )
-                    start_adding_reactions(class_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                    pred = ReactionPredicate.yes_or_no(class_msg, ctx.author)
-                    try:
-                        await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                    except asyncio.TimeoutError:
-                        await self._clear_react(class_msg)
-                        ctx.command.reset_cooldown(ctx)
-                        return
-
-                    if not pred.result:
-                        await class_msg.edit(
-                            content=box(
-                                _("{author} decided to continue being a {h_class}.").format(
-                                    author=escape(ctx.author.display_name),
-                                    h_class=c.heroclass["name"],
+                    ctx.command.reset_cooldown(ctx)
+                    return await self._clear_react(class_msg)
+                if bal < spend:
+                    await class_msg.edit(content=broke, view=None)
+                    ctx.command.reset_cooldown(ctx)
+                    return await self._clear_react(class_msg)
+                if not await bank.can_spend(ctx.author, spend):
+                    return await class_msg.edit(content=broke, view=None)
+                try:
+                    c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
+                except Exception as exc:
+                    log.exception("Error with the new character sheet", exc_info=exc)
+                    return
+                now_class_msg = _("Congratulations, {author}.\nYou are now a {clz}.").format(
+                    author=escape(ctx.author.display_name), clz=clz.ansi
+                )
+                if c.lvl >= 10:
+                    if current_class in [HeroClasses.tinkerer, HeroClasses.ranger]:
+                        view = ConfirmView(60, ctx.author)
+                        if current_class is HeroClasses.tinkerer:
+                            await self._clear_react(class_msg)
+                            await class_msg.edit(
+                                content=box(
+                                    _(
+                                        "{}, you will lose your forged "
+                                        "device if you change your class.\nShall I proceed?"
+                                    ).format(escape(ctx.author.display_name)),
+                                    lang="ansi",
                                 ),
-                                lang="css",
+                                view=view,
                             )
-                        )
-                        ctx.command.reset_cooldown(ctx)
-                        return await self._clear_react(class_msg)
-                    if bal < spend:
-                        await class_msg.edit(content=broke)
-                        ctx.command.reset_cooldown(ctx)
-                        return await self._clear_react(class_msg)
-                    if not await bank.can_spend(ctx.author, spend):
-                        return await class_msg.edit(content=broke)
-                    try:
-                        c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
-                    except Exception as exc:
-                        log.exception("Error with the new character sheet", exc_info=exc)
-                        return
-                    now_class_msg = _("Congratulations, {author}.\nYou are now a {clz}.").format(
-                        author=escape(ctx.author.display_name), clz=classes[clz]["name"]
-                    )
-                    if c.lvl >= 10:
-                        if c.heroclass["name"] == "Tinkerer" or c.heroclass["name"] == "Ranger":
-                            if c.heroclass["name"] == "Tinkerer":
-                                await self._clear_react(class_msg)
-                                await class_msg.edit(
-                                    content=box(
-                                        _(
-                                            "{}, you will lose your forged "
-                                            "device if you change your class.\nShall I proceed?"
-                                        ).format(escape(ctx.author.display_name)),
-                                        lang="css",
-                                    )
-                                )
-                            else:
-                                await self._clear_react(class_msg)
-                                await class_msg.edit(
-                                    content=box(
-                                        _(
-                                            "{}, you will lose your pet if you change your class.\nShall I proceed?"
-                                        ).format(escape(ctx.author.display_name)),
-                                        lang="css",
-                                    )
-                                )
-                            start_adding_reactions(class_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                            pred = ReactionPredicate.yes_or_no(class_msg, ctx.author)
-                            try:
-                                await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                            except asyncio.TimeoutError:
-                                await self._clear_react(class_msg)
-                                ctx.command.reset_cooldown(ctx)
-                                return
-                            if pred.result:  # user reacted with Yes.
-                                tinker_wep = []
-                                for item in c.get_current_equipment():
-                                    if item.rarity == "forged":
-                                        c = await c.unequip_item(item)
-                                for (name, item) in c.backpack.items():
-                                    if item.rarity == "forged":
-                                        tinker_wep.append(item)
-                                for item in tinker_wep:
-                                    del c.backpack[item.name]
-                                if c.heroclass["name"] == "Tinkerer":
-                                    await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
-                                    if tinker_wep:
-                                        await class_msg.edit(
-                                            content=box(
-                                                _("{} has run off to find a new master.").format(
-                                                    humanize_list(tinker_wep)
-                                                ),
-                                                lang="css",
-                                            )
-                                        )
-
-                                else:
-                                    c.heroclass["ability"] = False
-                                    c.heroclass["pet"] = {}
-                                    c.heroclass = classes[clz]
-
-                                    await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
-                                    await self._clear_react(class_msg)
+                        else:
+                            await self._clear_react(class_msg)
+                            await class_msg.edit(
+                                content=box(
+                                    _("{}, you will lose your pet if you change your class.\nShall I proceed?").format(
+                                        escape(ctx.author.display_name)
+                                    ),
+                                    lang="ansi",
+                                ),
+                                view=view,
+                            )
+                        await view.wait()
+                        if view.confirmed is None:
+                            ctx.command.reset_cooldown(ctx)
+                            return
+                        if view.confirmed:  # user reacted with Yes.
+                            tinker_wep = []
+                            for item in c.get_current_equipment():
+                                if item.rarity is Rarities.forged:
+                                    c = await c.unequip_item(item)
+                            for name, item in c.backpack.items():
+                                if item.rarity is Rarities.forged:
+                                    tinker_wep.append(item)
+                            for item in tinker_wep:
+                                del c.backpack[item.name]
+                            if current_class is HeroClasses.tinkerer:
+                                await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
+                                if tinker_wep:
                                     await class_msg.edit(
                                         content=box(
-                                            _("{} released their pet into the wild.\n").format(
-                                                escape(ctx.author.display_name)
-                                            ),
-                                            lang="css",
-                                        )
+                                            _("{} has run off to find a new master.").format(humanize_list(tinker_wep)),
+                                            lang="ansi",
+                                        ),
+                                        view=None,
                                     )
-                                await class_msg.edit(content=class_msg.content + box(now_class_msg, lang="css"))
+
                             else:
+                                c.heroclass["ability"] = False
+                                c.heroclass["pet"] = {}
+                                c.heroclass = clz.to_json()
+
+                                await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                                 await self._clear_react(class_msg)
                                 await class_msg.edit(
                                     content=box(
-                                        _("{}, you will remain a {}").format(
-                                            escape(ctx.author.display_name), c.heroclass["name"]
+                                        _("{} released their pet into the wild.\n").format(
+                                            escape(ctx.author.display_name)
                                         ),
-                                        lang="css",
-                                    )
+                                        lang="ansi",
+                                    ),
+                                    view=None,
                                 )
-                                ctx.command.reset_cooldown(ctx)
-                                return
-                        if c.skill["pool"] < 0:
-                            c.skill["pool"] = 0
-                        c.heroclass = classes[clz]
-                        if c.heroclass["name"] in ["Wizard", "Cleric"]:
-                            c.heroclass["cooldown"] = (
-                                max(300, (1200 - max((c.luck + c.total_int) * 2, 0))) + time.time()
+                            await class_msg.edit(content=class_msg.content + box(now_class_msg, lang="ansi"), view=None)
+                        else:
+                            await self._clear_react(class_msg)
+                            await class_msg.edit(
+                                content=box(
+                                    _("{}, you will remain a {}").format(
+                                        escape(ctx.author.display_name), c.hc.class_name
+                                    ),
+                                    lang="ansi",
+                                ),
+                                view=None,
                             )
-                        elif c.heroclass["name"] == "Ranger":
-                            c.heroclass["cooldown"] = (
-                                max(1800, (7200 - max(c.luck * 2 + c.total_int * 2, 0))) + time.time()
-                            )
-                            c.heroclass["catch_cooldown"] = (
-                                max(600, (3600 - max(c.luck * 2 + c.total_int * 2, 0))) + time.time()
-                            )
-                        elif c.heroclass["name"] == "Berserker":
-                            c.heroclass["cooldown"] = (
-                                max(300, (1200 - max((c.luck + c.total_att) * 2, 0))) + time.time()
-                            )
-                        elif c.heroclass["name"] == "Bard":
-                            c.heroclass["cooldown"] = (
-                                max(300, (1200 - max((c.luck + c.total_cha) * 2, 0))) + time.time()
-                            )
-                        elif c.heroclass["name"] == "Tinkerer":
-                            c.heroclass["cooldown"] = (
-                                max(900, (3600 - max((c.luck + c.total_int) * 2, 0))) + time.time()
-                            )
-                        elif c.heroclass["name"] == "Psychic":
-                            c.heroclass["cooldown"] = max(300, (900 - max((c.luck - c.total_cha) * 2, 0))) + time.time()
-                        await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
-                        await self._clear_react(class_msg)
-                        await class_msg.edit(content=box(now_class_msg, lang="css"))
-                        try:
-                            await bank.withdraw_credits(ctx.author, spend)
-                        except ValueError:
-                            return await class_msg.edit(content=broke)
-                    else:
-                        ctx.command.reset_cooldown(ctx)
-                        await smart_embed(
-                            ctx,
-                            _("{user}, you need to be at least level 10 to choose a class.").format(
-                                user=bold(ctx.author.display_name)
-                            ),
+                            ctx.command.reset_cooldown(ctx)
+                            return
+                    if c.skill["pool"] < 0:
+                        c.skill["pool"] = 0
+                    c.heroclass = clz.to_json()
+                    if c.hc in [HeroClasses.wizard, HeroClasses.cleric]:
+                        c.heroclass["cooldown"] = max(300, (1200 - max((c.luck + c.total_int) * 2, 0))) + time.time()
+                    elif c.hc is HeroClasses.ranger:
+                        c.heroclass["cooldown"] = max(1800, (7200 - max(c.luck * 2 + c.total_int * 2, 0))) + time.time()
+                        c.heroclass["catch_cooldown"] = (
+                            max(600, (3600 - max(c.luck * 2 + c.total_int * 2, 0))) + time.time()
                         )
+                    elif c.hc is HeroClasses.berserker:
+                        c.heroclass["cooldown"] = max(300, (1200 - max((c.luck + c.total_att) * 2, 0))) + time.time()
+                    elif c.hc is HeroClasses.bard:
+                        c.heroclass["cooldown"] = max(300, (1200 - max((c.luck + c.total_cha) * 2, 0))) + time.time()
+                    elif c.hc is HeroClasses.tinkerer:
+                        c.heroclass["cooldown"] = max(900, (3600 - max((c.luck + c.total_int) * 2, 0))) + time.time()
+                    elif c.hc is HeroClasses.psychic:
+                        c.heroclass["cooldown"] = max(300, (900 - max((c.luck - c.total_cha) * 2, 0))) + time.time()
+                    await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
+                    await self._clear_react(class_msg)
+                    await class_msg.edit(content=box(now_class_msg, lang="ansi"), view=None)
+                    try:
+                        await bank.withdraw_credits(ctx.author, spend)
+                    except ValueError:
+                        return await class_msg.edit(content=broke, view=None)
+                else:
+                    ctx.command.reset_cooldown(ctx)
+                    await smart_embed(
+                        ctx,
+                        _("{user}, you need to be at least level 10 to choose a class.").format(
+                            user=bold(ctx.author.display_name)
+                        ),
+                    )
 
-    @commands.group(autohelp=False)
+    @commands.hybrid_group(autohelp=False, fallback="find")
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.user)
     async def pet(self, ctx: commands.Context):
         """[Ranger Class Only]
@@ -350,7 +270,7 @@ class ClassAbilities(AdventureMixin):
                 except Exception as exc:
                     log.exception("Error with the new character sheet", exc_info=exc)
                     return
-                if c.heroclass["name"] != "Ranger":
+                if c.hc is not HeroClasses.ranger:
                     return await smart_embed(
                         ctx,
                         _("{user}, you need to be a Ranger to do this.").format(user=bold(ctx.author.display_name)),
@@ -362,7 +282,7 @@ class ClassAbilities(AdventureMixin):
                             _("{author}, you already have a pet. Try foraging ({prefix}pet forage).").format(
                                 author=escape(ctx.author.display_name), prefix=ctx.prefix
                             ),
-                            lang="css",
+                            lang="ansi",
                         )
                     )
                 else:
@@ -414,7 +334,7 @@ class ClassAbilities(AdventureMixin):
                             pet_msg4 = _("\nPerhaps you're missing some requirements to tame {pet}.").format(pet=pet)
                     pet_msg = box(
                         _("{c} is trying to tame a pet.").format(c=escape(ctx.author.display_name)),
-                        lang="css",
+                        lang="ansi",
                     )
                     user_msg = await ctx.send(pet_msg)
                     await asyncio.sleep(2)
@@ -425,7 +345,7 @@ class ClassAbilities(AdventureMixin):
                             pet_name=pet,
                             roll=roll,
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                     await user_msg.edit(content=f"{pet_msg}\n{pet_msg2}")
                     await asyncio.sleep(2)
@@ -456,12 +376,12 @@ class ClassAbilities(AdventureMixin):
                                 )
                                 pet_msg3 = box(
                                     msg,
-                                    lang="css",
+                                    lang="ansi",
                                 )
                             else:
                                 pet_msg3 = box(
                                     _("{bonus}\nThey successfully tamed the {pet}.").format(bonus=bonus, pet=pet),
-                                    lang="css",
+                                    lang="ansi",
                                 )
                             await user_msg.edit(content=f"{pet_msg}\n{pet_msg2}\n{pet_msg3}")
                             c.heroclass["pet"] = pet_list[pet]
@@ -471,20 +391,20 @@ class ClassAbilities(AdventureMixin):
                             bonus = _("But they stepped on a twig and scared it away.")
                             pet_msg3 = box(
                                 _("{bonus}\nThe {pet} escaped.").format(bonus=bonus, pet=pet),
-                                lang="css",
+                                lang="ansi",
                             )
                             await user_msg.edit(content=f"{pet_msg}\n{pet_msg2}\n{pet_msg3}{pet_msg4}")
                         else:
                             bonus = ""
                             pet_msg3 = box(
                                 _("{bonus}\nThe {pet} escaped.").format(bonus=bonus, pet=pet),
-                                lang="css",
+                                lang="ansi",
                             )
                             await user_msg.edit(content=f"{pet_msg}\n{pet_msg2}\n{pet_msg3}{pet_msg4}")
                     else:
                         pet_msg3 = box(
                             _("{bonus}\nThe {pet} escaped.").format(bonus=bonus, pet=pet),
-                            lang="css",
+                            lang="ansi",
                         )
                         await user_msg.edit(content=f"{pet_msg}\n{pet_msg2}\n{pet_msg3}{pet_msg4}")
 
@@ -500,7 +420,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Ranger":
+            if c.hc is not HeroClasses.ranger:
                 return
             if not c.heroclass["pet"]:
                 return await smart_embed(
@@ -539,7 +459,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Ranger":
+            if c.hc is not HeroClasses.ranger:
                 return await smart_embed(
                     ctx,
                     _("{user}, you need to be a Ranger to do this.").format(user=bold(ctx.author.display_name)),
@@ -552,9 +472,9 @@ class ClassAbilities(AdventureMixin):
                     _("{user} released their pet into the wild..").format(user=bold(ctx.author.display_name)),
                 )
             else:
-                return await ctx.send(box(_("You don't have a pet."), lang="css"))
+                return await ctx.send(box(_("You don't have a pet."), lang="ansi"))
 
-    @commands.command()
+    @commands.hybrid_command()
     async def bless(self, ctx: commands.Context):
         """[Cleric Class Only]
 
@@ -566,7 +486,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Cleric":
+            if c.hc is not HeroClasses.cleric:
                 ctx.command.reset_cooldown(ctx)
                 return await smart_embed(
                     ctx,
@@ -605,7 +525,7 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.guild_only()
     @commands.cooldown(rate=1, per=30, type=commands.BucketType.user)
     async def insight(self, ctx: commands.Context):
@@ -618,7 +538,7 @@ class ClassAbilities(AdventureMixin):
             log.exception("Error with the new character sheet")
             ctx.command.reset_cooldown(ctx)
             return
-        if c.heroclass["name"] != "Psychic":
+        if c.hc is not HeroClasses.psychic:
             return await smart_embed(
                 ctx,
                 _("{user}, you need to be a Psychic to do this.").format(user=bold(ctx.author.display_name)),
@@ -799,7 +719,7 @@ class ClassAbilities(AdventureMixin):
                     ),
                 )
 
-    @commands.command()
+    @commands.hybrid_command()
     async def rage(self, ctx: commands.Context):
         """[Berserker Class Only]
 
@@ -811,7 +731,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Berserker":
+            if c.hc is not HeroClasses.berserker:
                 ctx.command.reset_cooldown(ctx)
                 return await smart_embed(
                     ctx,
@@ -850,7 +770,7 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
 
-    @commands.command()
+    @commands.hybrid_command()
     async def focus(self, ctx: commands.Context):
         """[Wizard Class Only]
 
@@ -862,7 +782,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Wizard":
+            if c.hc is not HeroClasses.wizard:
                 ctx.command.reset_cooldown(ctx)
                 return await smart_embed(
                     ctx,
@@ -901,7 +821,7 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
 
-    @commands.command()
+    @commands.hybrid_command()
     async def music(self, ctx: commands.Context):
         """[Bard Class Only]
 
@@ -913,7 +833,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Bard":
+            if c.hc is not HeroClasses.bard:
                 ctx.command.reset_cooldown(ctx)
                 return await smart_embed(
                     ctx,
@@ -952,9 +872,9 @@ class ClassAbilities(AdventureMixin):
                     )
 
     @commands.max_concurrency(1, per=commands.BucketType.user)
-    @commands.command()
+    @commands.hybrid_command()
     @commands.bot_has_permissions(add_reactions=True)
-    async def forge(self, ctx):
+    async def forge(self, ctx: commands.Context):
         """[Tinkerer Class Only]
 
         This allows a Tinkerer to forge two items into a device. (1h cooldown)
@@ -969,7 +889,7 @@ class ClassAbilities(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            if c.heroclass["name"] != "Tinkerer":
+            if c.hc is not HeroClasses.tinkerer:
                 return await smart_embed(
                     ctx,
                     _("{}, you need to be a Tinkerer to do this.").format(bold(ctx.author.display_name)),
@@ -987,9 +907,9 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                 ascended_forge_msg = ""
-                ignored_rarities = ["forged", "set", "event"]
+                ignored_rarities = [Rarities.forged, Rarities.set, Rarities.event]
                 if c.rebirths < 30:
-                    ignored_rarities.append("ascended")
+                    ignored_rarities.append(Rarities.ascended)
                     ascended_forge_msg += _("\n\nAscended items will be forgeable after 30 rebirths.")
                 consumed = []
                 forgeables_items = [str(i) for n, i in c.backpack.items() if i.rarity not in ignored_rarities]
@@ -1002,12 +922,13 @@ class ClassAbilities(AdventureMixin):
                     )
                 pages = await c.get_backpack(forging=True, clean=True)
                 if not pages:
-                    return await smart_embed(
+                    await smart_embed(
                         ctx,
                         _("{}, you need at least two forgeable items in your backpack to forge.").format(
                             bold(ctx.author.display_name)
                         ),
                     )
+                    return
                 await BaseMenu(
                     source=SimpleSource(pages),
                     delete_message_after=True,
@@ -1057,7 +978,7 @@ class ClassAbilities(AdventureMixin):
                 except asyncio.TimeoutError:
                     timeout_msg = _("I don't have all day you know, {}.").format(bold(ctx.author.display_name))
                     return await smart_embed(ctx, timeout_msg)
-                if item.rarity in ["forged", "set"]:
+                if item.rarity in [Rarities.forged, Rarities.set]:
                     return await smart_embed(
                         ctx,
                         _("{c}, {item.rarity} items cannot be reforged.").format(
@@ -1113,7 +1034,7 @@ class ClassAbilities(AdventureMixin):
                 except asyncio.TimeoutError:
                     timeout_msg = _("I don't have all day you know, {}.").format(bold(ctx.author.display_name))
                     return await smart_embed(ctx, timeout_msg)
-                if item.rarity in ["forged", "set"]:
+                if item.rarity in [Rarities.forged, Rarities.set]:
                     return await smart_embed(
                         ctx,
                         _("{c}, {item.rarity} items cannot be reforged.").format(
@@ -1128,28 +1049,23 @@ class ClassAbilities(AdventureMixin):
                     await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                 # save so the items are eaten up already
                 for item in c.get_current_equipment():
-                    if item.rarity == "forged":
+                    if item.rarity is Rarities.forged:
                         c = await c.unequip_item(item)
-                lookup = list(i for n, i in c.backpack.items() if i.rarity == "forged")
+                lookup = list(i for n, i in c.backpack.items() if i.rarity is Rarities.forged)
                 if len(lookup) > 0:
                     forge_str = box(
                         _("{author}, you already have a device. Do you want to replace {replace}?").format(
                             author=escape(ctx.author.display_name),
                             replace=", ".join([str(x) for x in lookup]),
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
-                    forge_msg = await ctx.send(forge_str)
-                    start_adding_reactions(forge_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-                    pred = ReactionPredicate.yes_or_no(forge_msg, ctx.author)
-                    try:
-                        await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-                    except asyncio.TimeoutError:
-                        await self._clear_react(forge_msg)
-                        return
+                    view = ConfirmView(60, ctx.author)
+                    forge_msg = await ctx.send(forge_str, view=view)
+                    await view.wait()
                     with contextlib.suppress(discord.HTTPException):
                         await forge_msg.delete()
-                    if pred.result:  # user reacted with Yes.
+                    if view.confirmed:  # user reacted with Yes.
                         c.heroclass["cooldown"] = time.time() + cooldown_time
                         created_item = box(
                             _("{author}, your new {newitem} consumed {lk} and is now lurking in your backpack.").format(
@@ -1157,7 +1073,7 @@ class ClassAbilities(AdventureMixin):
                                 newitem=newitem,
                                 lk=", ".join([str(x) for x in lookup]),
                             ),
-                            lang="css",
+                            lang="ansi",
                         )
                         for item in lookup:
                             del c.backpack[item.name]
@@ -1171,7 +1087,7 @@ class ClassAbilities(AdventureMixin):
                             _("{author}, {newitem} got mad at your rejection and blew itself up.").format(
                                 author=escape(ctx.author.display_name), newitem=newitem
                             ),
-                            lang="css",
+                            lang="ansi",
                         )
                         return await ctx.send(mad_forge)
                 else:
@@ -1182,7 +1098,7 @@ class ClassAbilities(AdventureMixin):
                         _("{author}, your new {newitem} is lurking in your backpack.").format(
                             author=escape(ctx.author.display_name), newitem=newitem
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                     await ctx.send(forged_item)
 
@@ -1247,7 +1163,7 @@ class ClassAbilities(AdventureMixin):
                     new_luck=(newluck * 2),
                     hand=hand,
                 ),
-                lang="css",
+                lang="ansi",
             )
             await ctx.send(two_handed_msg)
         else:
@@ -1272,7 +1188,7 @@ class ClassAbilities(AdventureMixin):
                     new_luck=newluck,
                     hand=hand,
                 ),
-                lang="css",
+                lang="ansi",
             )
             await ctx.send(reg_item)
         get_name = _(

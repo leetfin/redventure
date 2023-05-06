@@ -225,7 +225,7 @@ class ScoreboardSource(WeeklyScoreboardSource):
             ),
         )
         embed.set_footer(text=f"Page {menu.current_page + 1}/{self.get_max_pages()}")
-        return {"embed": embed, "content": self._legend}
+        return embed
 
 
 class NVScoreboardSource(WeeklyScoreboardSource):
@@ -402,51 +402,121 @@ class EconomySource(menus.ListPageSource):
         return embed
 
 
-class BaseMenu(menus.MenuPages, inherit_buttons=False):
+class StopButton(discord.ui.Button):
+    def __init__(
+        self,
+        style: discord.ButtonStyle,
+        row: Optional[int] = None,
+    ):
+        super().__init__(style=style, row=row)
+        self.style = style
+        self.emoji = "\N{HEAVY MULTIPLICATION X}\N{VARIATION SELECTOR-16}"
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.stop()
+        if interaction.message.flags.ephemeral:
+            await interaction.response.edit_message(view=None)
+            return
+        await interaction.message.delete()
+
+
+class _NavigateButton(discord.ui.Button):
+    def __init__(self, style: discord.ButtonStyle, emoji: Union[str, discord.PartialEmoji], direction: int):
+        super().__init__(style=style, emoji=emoji)
+        self.direction = direction
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.direction == 0:
+            self.view.current_page = 0
+        elif self.direction == self.view.source.get_max_pages():
+            self.view.current_page = self.view.source.get_max_pages() - 1
+        else:
+            self.view.current_page += self.direction
+        try:
+            page = await self.view.source.get_page(self.view.current_page)
+        except IndexError:
+            self.view.current_page = 0
+            page = await self.view.source.get_page(self.view.current_page)
+        kwargs = await self.view._get_kwargs_from_page(page)
+        await interaction.response.edit_message(**kwargs)
+
+
+class BaseMenu(discord.ui.View):
     def __init__(
         self,
         source: menus.PageSource,
         clear_reactions_after: bool = True,
         delete_message_after: bool = False,
-        timeout: int = 60,
+        timeout: int = 180,
         message: discord.Message = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(
-            source,
-            clear_reactions_after=clear_reactions_after,
-            delete_message_after=delete_message_after,
-            timeout=timeout,
-            message=message,
-            **kwargs,
+        super().__init__(timeout=timeout)
+        self._source = source
+        self.page_start = kwargs.get("page_start", 0)
+        self.current_page = self.page_start
+        self.message = message
+        self.forward_button = _NavigateButton(
+            discord.ButtonStyle.grey,
+            "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
+            direction=1,
         )
-        self.__tasks = self._Menu__tasks
+        self.backward_button = _NavigateButton(
+            discord.ButtonStyle.grey,
+            "\N{BLACK LEFT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
+            direction=-1,
+        )
+        self.first_button = _NavigateButton(
+            discord.ButtonStyle.grey,
+            "\N{BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
+            direction=0,
+        )
+        self.last_button = _NavigateButton(
+            discord.ButtonStyle.grey,
+            "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
+            direction=self.source.get_max_pages(),
+        )
+        self.stop_button = StopButton(discord.ButtonStyle.red)
+        self.add_item(self.stop_button)
+        if self.source.is_paginating():
+            self.add_item(self.first_button)
+            self.add_item(self.backward_button)
+            self.add_item(self.forward_button)
+            self.add_item(self.last_button)
 
-    async def update(self, payload):
-        """|coro|
+    async def on_timeout(self):
+        if self.message is not None:
+            await self.message.edit(view=None)
 
-        Updates the menu after an event has been received.
+    @property
+    def source(self):
+        return self._source
 
-        Parameters
-        -----------
-        payload: :class:`discord.RawReactionActionEvent`
-            The reaction event that triggered this update.
+    async def change_source(self, source: menus.PageSource, interaction: discord.Interaction):
+        self._source = source
+        self.current_page = 0
+        if self.message is not None:
+            await source._prepare_once()
+            await self.show_page(0, interaction)
+
+    async def update(self):
         """
-        button = self.buttons[payload.emoji]
-        if not self._running:
-            return
+        Define this here so that subclasses can utilize this hook
+        and update the state of the view before sending.
+        This is useful for modifying disabled buttons etc.
 
-        try:
-            if button.lock:
-                async with self._lock:
-                    if self._running:
-                        await button(self, payload)
-            else:
-                await button(self, payload)
-        except Exception as exc:
-            log.debug("Ignored exception on reaction event", exc_info=exc)
+        This gets called after the page has been formatted.
+        """
+        pass
 
-    async def start(self, ctx, *, channel=None, wait=False, page: int = 0):
+    async def start(
+        self,
+        ctx: Optional[commands.Context],
+        *,
+        wait=False,
+        page: int = 0,
+        interaction: Optional[discord.Interaction] = None,
+    ):
         """
         Starts the interactive menu session.
 
@@ -469,46 +539,39 @@ class BaseMenu(menus.MenuPages, inherit_buttons=False):
             Adding a reaction failed.
         """
 
-        # Clear the buttons cache and re-compute if possible.
-        try:
-            del self.buttons
-        except AttributeError:
-            pass
-
-        self.bot = bot = ctx.bot
+        if ctx is not None:
+            self.bot = ctx.bot
+            self._author_id = ctx.author.id
+        elif interaction is not None:
+            self.bot = interaction.client
+            self._author_id = interaction.user.id
         self.ctx = ctx
-        self._author_id = ctx.author.id
-        channel = channel or ctx.channel
-        is_guild = isinstance(channel, discord.abc.GuildChannel)
-        me = ctx.guild.me if is_guild else ctx.bot.user
-        permissions = channel.permissions_for(me)
-        self.__me = discord.Object(id=me.id)
-        self._verify_permissions(ctx, channel, permissions)
-        self._event.clear()
         msg = self.message
         if msg is None:
-            self.message = msg = await self.send_initial_message(ctx, channel, page=page)
-        if self.should_add_reactions():
-            # Start the task first so we can listen to reactions before doing anything
-            for task in self.__tasks:
-                task.cancel()
-            self.__tasks.clear()
+            self.message = await self.send_initial_message(ctx, page=page, interaction=interaction)
+        if wait:
+            return await self.wait()
 
-            self._running = True
-            self.__tasks.append(bot.loop.create_task(self._internal_loop()))
+    async def _get_kwargs_from_page(self, page: Any):
+        value = await self.source.format_page(self, page)
+        if isinstance(value, dict):
+            return value
+        elif isinstance(value, str):
+            return {"content": value, "embed": None}
+        elif isinstance(value, discord.Embed):
+            return {"embed": value, "content": None}
+        return value
 
-            if self.should_add_reactions():
+    async def show_page(self, page_number: int, interaction: discord.Interaction):
+        page = await self.source.get_page(page_number)
+        self.current_page = page_number
+        kwargs = await self._get_kwargs_from_page(page)
+        await self.update()
+        await interaction.response.edit_message(**kwargs, view=self)
 
-                async def add_reactions_task():
-                    for emoji in self.buttons:
-                        await msg.add_reaction(emoji)
-
-                self.__tasks.append(bot.loop.create_task(add_reactions_task()))
-
-            if wait:
-                await self._event.wait()
-
-    async def send_initial_message(self, ctx: commands.Context, channel: discord.abc.Messageable, page: int = 0):
+    async def send_initial_message(
+        self, ctx: Optional[commands.Context], page: int = 0, interaction: Optional[discord.Interaction] = None
+    ):
         """
 
         The default implementation of :meth:`Menu.send_initial_message`
@@ -519,102 +582,51 @@ class BaseMenu(menus.MenuPages, inherit_buttons=False):
         self.current_page = page
         page = await self._source.get_page(page)
         kwargs = await self._get_kwargs_from_page(page)
-        return await channel.send(**kwargs)
+        await self.update()
+        if ctx is None and interaction is not None:
+            await interaction.response.send_message(**kwargs, view=self)
+            return await interaction.original_response()
+        else:
+            return await ctx.send(**kwargs, view=self)
 
-    async def show_checked_page(self, page_number: int) -> None:
+    async def show_checked_page(self, page_number: int, interaction: discord.Interaction) -> None:
         max_pages = self._source.get_max_pages()
         try:
             if max_pages is None:
                 # If it doesn't give maximum pages, it cannot be checked
-                await self.show_page(page_number)
+                await self.show_page(page_number, interaction)
             elif page_number >= max_pages:
-                await self.show_page(0)
+                await self.show_page(0, interaction)
             elif page_number < 0:
-                await self.show_page(max_pages - 1)
+                await self.show_page(max_pages - 1, interaction)
             elif max_pages > page_number >= 0:
-                await self.show_page(page_number)
+                await self.show_page(page_number, interaction)
         except IndexError:
             # An error happened that can be handled, so ignore it.
             pass
 
-    def reaction_check(self, payload):
-        """Just extends the default reaction_check to use owner_ids"""
-        if payload.message_id != self.message.id:
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id not in (*interaction.client.owner_ids, self._author_id):
+            await interaction.response.send_message(_("You are not authorized to interact with this."))
             return False
-        if payload.user_id not in (*self.bot.owner_ids, self._author_id):
-            return False
-        return payload.emoji in self.buttons
-
-    def _skip_single_arrows(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages == 1
-
-    def _skip_double_triangle_buttons(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages <= 2
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        position=menus.First(1),
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_previous_page(self, payload):
-        """go to the previous page"""
-        await self.show_checked_page(self.current_page - 1)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        position=menus.Last(0),
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_next_page(self, payload):
-        """go to the next page"""
-        await self.show_checked_page(self.current_page + 1)
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        position=menus.First(0),
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_first_page(self, payload):
-        """go to the first page"""
-        await self.show_page(0)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        position=menus.Last(1),
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_last_page(self, payload):
-        """go to the last page"""
-        # The call here is safe because it's guarded by skip_if
-        await self.show_page(self._source.get_max_pages() - 1)
-
-    @menus.button("\N{CROSS MARK}")
-    async def stop_pages(self, payload: discord.RawReactionActionEvent) -> None:
-        """stops the pagination session."""
-        self.stop()
+        return True
 
 
-class ScoreBoardMenu(BaseMenu, inherit_buttons=False):
+class ScoreBoardMenu(BaseMenu):
     def __init__(
         self,
         source: menus.PageSource,
         cog: Optional[commands.Cog] = None,
         clear_reactions_after: bool = True,
         delete_message_after: bool = False,
-        timeout: int = 60,
+        timeout: int = 180,
         message: discord.Message = None,
         show_global: bool = False,
         current_scoreboard: str = "wins",
         **kwargs: Any,
     ) -> None:
         super().__init__(
-            source,
+            source=source,
             clear_reactions_after=clear_reactions_after,
             delete_message_after=delete_message_after,
             timeout=timeout,
@@ -625,146 +637,144 @@ class ScoreBoardMenu(BaseMenu, inherit_buttons=False):
         self.show_global = show_global
         self._current = current_scoreboard
 
-    def _skip_single_arrows(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages == 1
+    async def update(self):
+        buttons = {
+            "wins": self.wins,
+            "losses": self.losses,
+            "fight": self.physical,
+            "spell": self.magic,
+            "talk": self.diplomacy,
+            "pray": self.praying,
+            "run": self.runner,
+            "fumble": self.fumble,
+        }
+        for button in buttons.values():
+            button.disabled = False
+        buttons[self._current].disabled = True
 
-    def _skip_double_triangle_buttons(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages <= 2
-
-    @menus.button("\N{FACE WITH PARTY HORN AND PARTY HAT}")
-    async def wins(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(
+        label=_("Wins"),
+        style=discord.ButtonStyle.grey,
+        emoji="\N{FACE WITH PARTY HORN AND PARTY HAT}",
+        row=1,
+        disabled=True,
+    )
+    async def wins(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "wins":
+            await interaction.response.defer()
+            # this deferal is unnecessary now since the buttons are just disabled
+            # however, in the event that the button gets passed and the state is not
+            # as we expect at least try not to send the user an interaction failed message
             return
         self._current = "wins"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{FIRE}")
-    async def losses(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Losses"), style=discord.ButtonStyle.grey, emoji="\N{FIRE}", row=1)
+    async def losses(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "loses":
+            await interaction.response.defer()
             return
         self._current = "loses"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{DAGGER KNIFE}")
-    async def physical(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Physical"), style=discord.ButtonStyle.grey, emoji="\N{DAGGER KNIFE}", row=1)
+    async def physical(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         """stops the pagination session."""
         if self._current == "fight":
+            await interaction.response.defer()
             return
         self._current = "fight"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{SPARKLES}")
-    async def magic(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Magic"), style=discord.ButtonStyle.grey, emoji="\N{SPARKLES}", row=1)
+    async def magic(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "spell":
+            await interaction.response.defer()
             return
         self._current = "spell"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{LEFT SPEECH BUBBLE}")
-    async def diplomacy(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Charisma"), style=discord.ButtonStyle.grey, emoji="\N{LEFT SPEECH BUBBLE}", row=1)
+    async def diplomacy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "talk":
+            await interaction.response.defer()
             return
         self._current = "talk"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{PERSON WITH FOLDED HANDS}")
-    async def praying(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Pray"), style=discord.ButtonStyle.grey, emoji="\N{PERSON WITH FOLDED HANDS}", row=2)
+    async def praying(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "pray":
+            await interaction.response.defer()
             return
         self._current = "pray"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{RUNNER}")
-    async def runner(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Run"), style=discord.ButtonStyle.grey, emoji="\N{RUNNER}", row=2)
+    async def runner(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "run":
+            await interaction.response.defer()
             return
         self._current = "run"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
-    @menus.button("\N{EXCLAMATION QUESTION MARK}")
-    async def fumble(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Fumbles"), style=discord.ButtonStyle.grey, emoji="\N{EXCLAMATION QUESTION MARK}", row=2)
+    async def fumble(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "fumbles":
+            await interaction.response.defer()
             return
         self._current = "fumbles"
         rebirth_sorted = await self.cog.get_global_scoreboard(
             guild=self.ctx.guild if not self.show_global else None, keyword=self._current
         )
-        await self.change_source(source=ScoreboardSource(entries=rebirth_sorted, stat=self._current))
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_first_page(self, payload):
-        """go to the first page"""
-        await self.show_page(0)
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_previous_page(self, payload):
-        """go to the previous page"""
-        await self.show_checked_page(self.current_page - 1)
-
-    @menus.button("\N{CROSS MARK}")
-    async def stop_pages(self, payload: discord.RawReactionActionEvent) -> None:
-        """stops the pagination session."""
-        self.stop()
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_next_page(self, payload):
-        """go to the next page"""
-        await self.show_checked_page(self.current_page + 1)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_last_page(self, payload):
-        """go to the last page"""
-        # The call here is safe because it's guarded by skip_if
-        await self.show_page(self._source.get_max_pages() - 1)
+        await self.change_source(
+            source=ScoreboardSource(entries=rebirth_sorted, stat=self._current), interaction=interaction
+        )
 
 
-class LeaderboardMenu(BaseMenu, inherit_buttons=False):
+class LeaderboardMenu(BaseMenu):
     def __init__(
         self,
         source: menus.PageSource,
         cog: Optional[commands.Cog] = None,
         clear_reactions_after: bool = True,
         delete_message_after: bool = False,
-        timeout: int = 60,
+        timeout: int = 180,
         message: discord.Message = None,
         show_global: bool = False,
         current_scoreboard: str = "leaderboard",
@@ -782,87 +792,50 @@ class LeaderboardMenu(BaseMenu, inherit_buttons=False):
         self.show_global = show_global
         self._current = current_scoreboard
 
-    def _skip_single_arrows(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages == 1
-
-    def _skip_double_triangle_buttons(self):
-        max_pages = self._source.get_max_pages()
-
-        if max_pages is None:
-            return True
-        return max_pages <= 2
+    async def update(self):
+        buttons = {"leaderboard": self.home, "economy": self.economy}
+        for button in buttons.values():
+            button.disabled = False
+        buttons[self._current].disabled = True
 
     def _unified_bank(self):
         return not self.cog._separate_economy
 
-    @menus.button("\N{CHART WITH UPWARDS TREND}")
-    async def home(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(
+        label=_("Leaderboard"),
+        style=discord.ButtonStyle.grey,
+        emoji="\N{CHART WITH UPWARDS TREND}",
+        row=1,
+        disabled=True,
+    )
+    async def home(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "leaderboard":
+            await interaction.response.defer()
             return
         self._current = "leaderboard"
         rebirth_sorted = await self.cog.get_leaderboard(guild=self.ctx.guild if not self.show_global else None)
-        await self.change_source(source=LeaderboardSource(entries=rebirth_sorted))
+        await self.change_source(source=LeaderboardSource(entries=rebirth_sorted), interaction=interaction)
 
-    @menus.button("\N{MONEY WITH WINGS}")
-    async def economy(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(label=_("Economy"), style=discord.ButtonStyle.grey, emoji="\N{MONEY WITH WINGS}", row=1)
+    async def economy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self._current == "economy":
+            await interaction.response.defer()
             return
         self._current = "economy"
         bank_sorted = await bank.get_leaderboard(
             guild=self.ctx.guild if not self.show_global else None, _forced=self._unified_bank()
         )
-        await self.change_source(source=EconomySource(entries=bank_sorted))
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_first_page(self, payload):
-        """go to the first page"""
-        await self.show_page(0)
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_previous_page(self, payload):
-        """go to the previous page"""
-        await self.show_checked_page(self.current_page - 1)
-
-    @menus.button("\N{CROSS MARK}")
-    async def stop_pages(self, payload: discord.RawReactionActionEvent) -> None:
-        """stops the pagination session."""
-        self.stop()
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_next_page(self, payload):
-        """go to the next page"""
-        await self.show_checked_page(self.current_page + 1)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_last_page(self, payload):
-        """go to the last page"""
-        # The call here is safe because it's guarded by skip_if
-        await self.show_page(self._source.get_max_pages() - 1)
+        await self.change_source(source=EconomySource(entries=bank_sorted), interaction=interaction)
 
 
-class BackpackMenu(BaseMenu, inherit_buttons=False):
+class BackpackMenu(BaseMenu):
     def __init__(
         self,
         source: menus.PageSource,
         help_command: commands.Command,
         clear_reactions_after: bool = True,
         delete_message_after: bool = False,
-        timeout: int = 60,
+        timeout: int = 180,
         message: discord.Message = None,
         **kwargs: Any,
     ) -> None:
@@ -876,111 +849,11 @@ class BackpackMenu(BaseMenu, inherit_buttons=False):
         )
         self.__help_command = help_command
 
-    async def update(self, payload):
-        """|coro|
-
-        Updates the menu after an event has been received.
-
-        Parameters
-        -----------
-        payload: :class:`discord.RawReactionActionEvent`
-            The reaction event that triggered this update.
-        """
-        button = self.buttons[payload.emoji]
-        if not self._running:
-            return
-
-        try:
-            if button.lock:
-                async with self._lock:
-                    if self._running:
-                        await button(self, payload)
-            else:
-                await button(self, payload)
-        except Exception as exc:
-            log.debug("Ignored exception on reaction event", exc_info=exc)
-
-    async def show_checked_page(self, page_number: int) -> None:
-        max_pages = self._source.get_max_pages()
-        try:
-            if max_pages is None:
-                # If it doesn't give maximum pages, it cannot be checked
-                await self.show_page(page_number)
-            elif page_number >= max_pages:
-                await self.show_page(0)
-            elif page_number < 0:
-                await self.show_page(max_pages - 1)
-            elif max_pages > page_number >= 0:
-                await self.show_page(page_number)
-        except IndexError:
-            # An error happened that can be handled, so ignore it.
-            pass
-
-    def reaction_check(self, payload):
-        """Just extends the default reaction_check to use owner_ids"""
-        if payload.message_id != self.message.id:
-            return False
-        if payload.user_id not in (*self.bot.owner_ids, self._author_id):
-            return False
-        return payload.emoji in self.buttons
-
-    def _skip_single_arrows(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages == 1
-
-    def _skip_double_triangle_buttons(self):
-        max_pages = self._source.get_max_pages()
-        if max_pages is None:
-            return True
-        return max_pages <= 2
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        position=menus.First(1),
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_previous_page(self, payload):
-        """go to the previous page"""
-        await self.show_checked_page(self.current_page - 1)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16}",
-        position=menus.Last(0),
-        skip_if=_skip_single_arrows,
-    )
-    async def go_to_next_page(self, payload):
-        """go to the next page"""
-        await self.show_checked_page(self.current_page + 1)
-
-    @menus.button(
-        "\N{BLACK LEFT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        position=menus.First(0),
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_first_page(self, payload):
-        """go to the first page"""
-        await self.show_page(0)
-
-    @menus.button(
-        "\N{BLACK RIGHT-POINTING DOUBLE TRIANGLE WITH VERTICAL BAR}\N{VARIATION SELECTOR-16}",
-        position=menus.Last(1),
-        skip_if=_skip_double_triangle_buttons,
-    )
-    async def go_to_last_page(self, payload):
-        """go to the last page"""
-        # The call here is safe because it's guarded by skip_if
-        await self.show_page(self._source.get_max_pages() - 1)
-
-    @menus.button("\N{CROSS MARK}")
-    async def stop_pages(self, payload: discord.RawReactionActionEvent) -> None:
-        """stops the pagination session."""
-        self.stop()
-
-    @menus.button("\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}")
-    async def send_help(self, payload: discord.RawReactionActionEvent) -> None:
+    @discord.ui.button(style=discord.ButtonStyle.grey, emoji="\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}", row=1)
+    async def send_help(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         """Sends help for the provided command."""
         await self.ctx.send_help(self.__help_command)
         self.delete_message_after = True
         self.stop()
+        await interaction.response.defer()
+        await self.on_timeout()

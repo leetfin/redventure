@@ -1,158 +1,194 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import asyncio
-import contextlib
 import logging
 import random
 import time
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import discord
 from redbot.core import commands
 from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import bold, box, humanize_number
-from redbot.core.utils.menus import start_adding_reactions
-from redbot.core.utils.predicates import MessagePredicate, ReactionPredicate
+from redbot.core.utils.chat_formatting import box, humanize_number
 
-from .abc import AdventureMixin
 from .bank import bank
-from .charsheet import Character
-from .helpers import escape, is_dev, smart_embed
+from .charsheet import Character, Item
+from .constants import ANSITextColours
+from .helpers import _get_epoch, escape, is_dev, smart_embed
 
 _ = Translator("Adventure", __file__)
 
 log = logging.getLogger("red.cogs.adventure")
 
 
-class AdventureCart(AdventureMixin):
-    """
-    This class handles the cart logic
-    """
+class TraderModal(discord.ui.Modal):
+    def __init__(self, item: Item, cog: commands.Cog, view: Trader, ctx: commands.Context):
+        super().__init__(title=_("How many would you like to buy?"))
+        self.item = item
+        self.cog = cog
+        self.ctx = ctx
+        self.view = view
+        self.amount_input = discord.ui.TextInput(
+            label=item.name,
+            style=discord.TextStyle.short,
+            placeholder=_("Amount"),
+            max_length=100,
+            min_length=0,
+            required=False,
+        )
+        self.add_item(self.amount_input)
 
-    # TODO: Replace this logic with more class based
-    # There's no reason to keep this as part of the master class
-    # Let's use more objects!
+    async def wasting_time(self, interaction: discord.Interaction):
+        await smart_embed(None, _("You're wasting my time."), interaction=interaction, ephemeral=True)
 
-    async def _handle_cart(self, reaction: discord.Reaction, user: discord.Member):
-        guild = user.guild
-        emojis = ReactionPredicate.NUMBER_EMOJIS
-        itemindex = emojis.index(str(reaction.emoji)) - 1
-        items = self._current_traders[guild.id]["stock"][itemindex]
-        self._current_traders[guild.id]["users"].append(user)
-        spender = user
-        channel = reaction.message.channel
+    async def on_submit(self, interaction: discord.Interaction):
+        if datetime.now(timezone.utc) >= self.view.end_time:
+            self.view.stop()
+            await interaction.response.send_message(
+                _("{cart_name} has moved onto the next village.").format(cart_name=self.view.cart_name), ephemeral=True
+            )
+            return
+        number = self.amount_input.value
+
+        if not number:
+            await self.wasting_time(interaction)
+            return
+        try:
+            number = int(number)
+        except ValueError:
+            await self.wasting_time(interaction)
+            return
+        if number < 0:
+            await self.wasting_time(interaction)
+            return
+
         currency_name = await bank.get_currency_name(
-            guild,
+            interaction.guild,
         )
         if currency_name.startswith("<"):
             currency_name = "credits"
-        item_data = box(items["item"].formatted_name + " - " + humanize_number(items["price"]), lang="css")
-        to_delete = await channel.send(
-            _("{user}, how many {item} would you like to buy?").format(user=user.mention, item=item_data)
-        )
-        ctx = await self.bot.get_context(reaction.message)
-        ctx.command = self.makecart
-        ctx.author = user
-        pred = MessagePredicate.valid_int(ctx)
-        try:
-            msg = await self.bot.wait_for("message", check=pred, timeout=30)
-        except asyncio.TimeoutError:
-            self._current_traders[guild.id]["users"].remove(user)
-            return
-        if pred.result < 1:
-            with contextlib.suppress(discord.HTTPException):
-                await to_delete.delete()
-                await msg.delete()
-            await smart_embed(ctx, _("You're wasting my time."))
-            self._current_traders[guild.id]["users"].remove(user)
-            return
-        if await bank.can_spend(spender, int(items["price"]) * pred.result):
-            await bank.withdraw_credits(spender, int(items["price"]) * pred.result)
-            async with self.get_lock(user):
+        spender = interaction.user
+        price = self.view.items.get(self.item.name, {}).get("price") * number
+        if await bank.can_spend(spender, price):
+            await bank.withdraw_credits(spender, price)
+            async with self.cog.get_lock(spender):
                 try:
-                    c = await Character.from_json(ctx, self.config, user, self._daily_bonus)
+                    c = await Character.from_json(self.ctx, self.cog.config, spender, self.cog._daily_bonus)
                 except Exception as exc:
                     log.exception("Error with the new character sheet", exc_info=exc)
                     return
-                if c.is_backpack_full(is_dev=is_dev(user)):
-                    with contextlib.suppress(discord.HTTPException):
-                        await to_delete.delete()
-                        await msg.delete()
-                    await channel.send(
-                        _("{author}, Your backpack is currently full.").format(author=bold(user.display_name))
+
+                if c.is_backpack_full(is_dev=is_dev(spender)):
+                    await interaction.response.send_message(
+                        _("**{author}**, Your backpack is currently full.").format(author=escape(spender.display_name))
                     )
                     return
-                item = items["item"]
-                item.owned = pred.result
-                await c.add_to_backpack(item, number=pred.result)
-                await self.config.user(user).set(await c.to_json(ctx, self.config))
-                with contextlib.suppress(discord.HTTPException):
-                    await to_delete.delete()
-                    await msg.delete()
-                await channel.send(
+                item = self.item
+                item.owned = number
+                await c.add_to_backpack(item, number=number)
+                await self.cog.config.user(spender).set(await c.to_json(self.ctx, self.cog.config))
+                await interaction.response.send_message(
                     box(
                         _(
                             "{author} bought {p_result} {item_name} for "
                             "{item_price} {currency_name} and put it into their backpack."
                         ).format(
-                            author=escape(user.display_name),
-                            p_result=pred.result,
+                            author=escape(spender.display_name),
+                            p_result=number,
                             item_name=item.formatted_name,
-                            item_price=humanize_number(items["price"] * pred.result),
+                            item_price=humanize_number(price),
                             currency_name=currency_name,
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                 )
-                self._current_traders[guild.id]["users"].remove(user)
         else:
-            with contextlib.suppress(discord.HTTPException):
-                await to_delete.delete()
-                await msg.delete()
-            await channel.send(
-                _("{author}, you do not have enough {currency_name}.").format(
-                    author=bold(user.display_name), currency_name=currency_name
+            await interaction.response.send_message(
+                _("**{author}**, you do not have enough {currency_name}.").format(
+                    author=escape(spender.display_name), currency_name=currency_name
                 )
             )
-            self._current_traders[guild.id]["users"].remove(user)
 
-    async def _trader(self, ctx: commands.Context, bypass=False):
-        em_list = ReactionPredicate.NUMBER_EMOJIS
 
-        cart = await self.config.cart_name()
-        if await self.config.guild(ctx.guild).cart_name():
-            cart = await self.config.guild(ctx.guild).cart_name()
-        text = box(_("[{} is bringing the cart around!]").format(cart), lang="css")
-        timeout = await self.config.guild(ctx.guild).cart_timeout()
-        if ctx.guild.id not in self._last_trade:
-            self._last_trade[ctx.guild.id] = 0
+class TraderButton(discord.ui.Button):
+    def __init__(self, item: Item, cog: commands.Cog):
+        super().__init__(label=item.name)
+        self.item = item
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction):
+        if datetime.now(timezone.utc) >= self.view.end_time:
+            self.view.stop()
+            await self.view.on_timeout()
+            await interaction.response.send_message(
+                _("{cart_name} has moved onto the next village.").format(cart_name=self.view.cart_name), ephemeral=True
+            )
+            return
+        modal = TraderModal(self.item, self.cog, view=self.view, ctx=self.view.ctx)
+        await interaction.response.send_modal(modal)
+
+
+class Trader(discord.ui.View):
+    def __init__(self, timeout: float, ctx: commands.Context, cog: commands.Cog):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.items = {}
+        self.message = None
+        self.stock_str = ""
+        self.end_time = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+        self.cart_name = _("Hawl's brother")
+
+    async def on_timeout(self):
+        if self.message is not None:
+            timestamp = f"<t:{int(self.end_time.timestamp())}:R>"
+            new_content = self.stock_str + _("{cart_name} left {time}.").format(
+                time=timestamp, cart_name=self.cart_name
+            )
+            await self.message.edit(content=new_content, view=None)
+
+    async def edit_timestamp(self):
+        if self.timeout is None:
+            return
+        self.end_time = datetime.now(timezone.utc) + timedelta(seconds=self.timeout)
+        timestamp = f"<t:{int(self.end_time.timestamp())}:R>"
+        text = self.stock_str
+        text += _("I am leaving {time}.\nDo you want to buy any of these fine items? Tell me which one below:").format(
+            time=timestamp
+        )
+        await self.message.edit(content=text)
+
+    async def start(self, ctx: commands.Context, bypass: bool = False, stockcount: Optional[int] = None):
+        cart = await self.cog.config.cart_name()
+        if await self.cog.config.guild(ctx.guild).cart_name():
+            cart = await self.cog.config.guild(ctx.guild).cart_name()
+        self.cart_name = cart
+        cart_header = _("[{cart_name} is bringing the cart around!]").format(cart_name=cart)
+        text = box(ANSITextColours.blue.as_str(cart_header), lang="ansi")
+        if ctx.guild.id not in self.cog._last_trade:
+            self.cog._last_trade[ctx.guild.id] = 0
 
         if not bypass:
-            if self._last_trade[ctx.guild.id] == 0:
-                self._last_trade[ctx.guild.id] = time.time()
-            elif self._last_trade[ctx.guild.id] >= time.time() - timeout:
+            if self.cog._last_trade[ctx.guild.id] == 0:
+                self.cog._last_trade[ctx.guild.id] = time.time()
+            elif self.cog._last_trade[ctx.guild.id] >= time.time() - self.timeout:
                 # trader can return after 3 hours have passed since last visit.
                 return  # silent return.
-        self._last_trade[ctx.guild.id] = time.time()
+        self.cog._last_trade[ctx.guild.id] = time.time()
 
-        room = await self.config.guild(ctx.guild).cartroom()
+        room = await self.cog.config.guild(ctx.guild).cartroom()
         if room:
             room = ctx.guild.get_channel(room)
         if room is None or bypass:
-            room = ctx.channel
-        if room is None:
-            return
-        room: discord.TextChannel
-        room_perms = room.permissions_for(ctx.me)
-        if not all([room_perms.send_messages, room_perms.add_reactions]):
-            log.debug(
-                "I don't have permissions to send messages or add reactions in {} ({})".format(room.id, room.guild.id)
-            )
-            return
-        self.bot.dispatch("adventure_cart", ctx)  # dispatch after silent return
-        stockcount = random.randint(3, 9)
-        controls = {em_list[i + 1]: i for i in range(stockcount)}
-        self._curent_trader_stock[ctx.guild.id] = (stockcount, controls)
+            room = ctx
+        self.cog.bot.dispatch("adventure_cart", ctx)  # dispatch after silent return
+        if stockcount is None:
+            stockcount = random.randint(3, 9)
+        self.cog._curent_trader_stock[ctx.guild.id] = (stockcount, {})
 
-        stock = await self._trader_get_items(ctx, stockcount)
+        stock = await self.generate(stockcount)
         currency_name = await bank.get_currency_name(
             ctx.guild,
         )
@@ -199,55 +235,46 @@ class AdventureCart(AdventureMixin):
                     item_price=humanize_number(item["price"]),
                     currency_name=currency_name,
                 ),
-                lang="css",
+                lang="ansi",
             )
-        text += _("Do you want to buy any of these fine items? Tell me which one below:")
-        msg = await room.send(text)
-        start_adding_reactions(msg, controls.keys())
-        self._current_traders[ctx.guild.id] = {"msg": msg.id, "stock": stock, "users": []}
-        timeout = self._last_trade[ctx.guild.id] + 180 - time.time()
-        if timeout <= 0:
-            timeout = 0
-        timer = await self._cart_countdown(ctx, timeout, _("The cart will leave in: "), room=room)
-        self.tasks[msg.id] = timer
-        try:
-            await asyncio.wait_for(timer, timeout + 5)
-        except asyncio.TimeoutError:
-            await self._clear_react(msg)
-            return
-        with contextlib.suppress(discord.HTTPException):
-            await msg.delete()
+        self.stock_str = text
+        timestamp = f"<t:{int(self.end_time.timestamp())}:R>"
+        text += _("I am leaving {time}.\nDo you want to buy any of these fine items? Tell me which one below:").format(
+            time=timestamp
+        )
+        self.message = await room.send(text, view=self)
 
-    async def _trader_get_items(self, ctx: commands.Context, howmany: int):
-        items = {}
+    async def generate(self, howmany: int = 5):
         output = {}
-        while len(items) < howmany:
+        howmany = max(min(25, howmany), 1)
+        while len(self.items) < howmany:
             rarity_roll = random.random()
             #  rarity_roll = .9
             # 1% legendary
             if rarity_roll >= 0.95:
-                item = await self._genitem(ctx, "legendary")
+                item = await self.ctx.cog._genitem(self.ctx, "legendary")
                 # min. 10 stat for legendary, want to be about 50k
                 price = random.randint(2500, 5000)
             # 20% epic
             elif rarity_roll >= 0.7:
-                item = await self._genitem(ctx, "epic")
+                item = await self.ctx.cog._genitem(self.ctx, "epic")
                 # min. 5 stat for epic, want to be about 25k
                 price = random.randint(1000, 2000)
             # 35% rare
             elif rarity_roll >= 0.35:
-                item = await self._genitem(ctx, "rare")
+                item = await self.ctx.cog._genitem(self.ctx, "rare")
                 # around 3 stat for rare, want to be about 3k
                 price = random.randint(500, 1000)
             else:
-                item = await self._genitem(ctx, "normal")
+                item = await self.ctx.cog._genitem(self.ctx, "normal")
                 # 1 stat for normal, want to be <1k
                 price = random.randint(100, 500)
             # 35% normal
             price *= item.max_main_stat
 
-            items.update({item.name: {"itemname": item.name, "item": item, "price": price, "lvl": item.lvl}})
+            self.items.update({item.name: {"itemname": item.name, "item": item, "price": price, "lvl": item.lvl}})
+            self.add_item(TraderButton(item, self.cog))
 
-        for (index, item) in enumerate(items):
-            output.update({index: items[item]})
+        for (index, item) in enumerate(self.items):
+            output.update({index: self.items[item]})
         return output

@@ -4,6 +4,10 @@ Welcome to Adventure! This is a text-based RPG idle game that you play with othe
 
 See the [Guide](/guide.md) for information on how to play!
 
+### >>> This branch is compatible with Red 3.5, and not 3.4.x <<<
+
+If you need a Red 3.4 version of this cog, see [here](https://github.com/aikaterna/gobcog/tree/red3.4).
+
 
 ## Basic Usage
 
@@ -118,7 +122,7 @@ Going from least to most powerful, generally the progression is normal < rare < 
 Forged items are a Tinker's specialty.
 Event items can be created by a bot owner as a special reward to hand out to specific users for bot events or other incentive-based rewards.
 
-```css
+```ansi
 {Event:''Event items look like this''}
 {.:'Forged items look like this':.}
 {Set:''Set items look like this''}

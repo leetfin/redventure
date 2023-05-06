@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import asyncio
 import contextlib
 import logging
 import random
@@ -11,13 +10,11 @@ import discord
 from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import bold, box, humanize_number
-from redbot.core.utils.menus import start_adding_reactions
-from redbot.core.utils.predicates import ReactionPredicate
 
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character
-from .helpers import is_dev, smart_embed
+from .helpers import ConfirmView, escape, is_dev, smart_embed
 
 _ = Translator("Adventure", __file__)
 
@@ -27,15 +24,19 @@ log = logging.getLogger("red.cogs.adventure")
 class Negaverse(AdventureMixin):
     """This class will handle negaverse interactions"""
 
-    @commands.command(name="negaverse", aliases=["nv"], cooldown_after_parsing=True)
+    @commands.hybrid_command(name="negaverse", aliases=["nv"], cooldown_after_parsing=True)
     @commands.cooldown(rate=1, per=3600, type=commands.BucketType.user)
     @commands.guild_only()
+    async def _negaverse_command(self, ctx: commands.Context, offering: int):
+        """This will send you to fight a nega-member!"""
+        await self._negaverse(ctx, offering)
+
     async def _negaverse(
         self,
         ctx: commands.Context,
-        offering: int = None,
-        roll: Optional[int] = -1,
-        nega: Union[discord.Member, discord.User] = None,
+        offering: Optional[int] = None,
+        roll: int = -1,
+        nega: Optional[discord.Member] = None,
     ):
         """This will send you to fight a nega-member!"""
         if self.in_adventure(ctx):
@@ -43,6 +44,7 @@ class Negaverse(AdventureMixin):
             return await smart_embed(
                 ctx,
                 _("You tried to teleport to another dimension but the monster ahead did not give you a chance."),
+                ephemeral=True,
             )
 
         bal = await bank.get_balance(ctx.author)
@@ -56,11 +58,13 @@ class Negaverse(AdventureMixin):
                 _(
                     "{author}, you need to specify how many "
                     "{currency_name} you are willing to offer to the gods for your success."
-                ).format(author=bold(ctx.author.display_name), currency_name=currency_name),
+                ).format(author=escape(ctx.author.display_name), currency_name=currency_name),
+                ephemeral=True,
             )
         if offering <= 500 or bal <= 500:
             ctx.command.reset_cooldown(ctx)
-            return await smart_embed(ctx, _("The gods refuse your pitiful offering."))
+            return await smart_embed(ctx, _("The gods refuse your pitiful offering."), ephemeral=True)
+        await ctx.defer()
         if offering > bal:
             offering = int(bal)
         admin_roll = -1
@@ -78,6 +82,7 @@ class Negaverse(AdventureMixin):
         xp_won_final = 0
         lock = self.get_lock(ctx.author)
         await lock.acquire()
+        view = ConfirmView(timeout=60, author=ctx.author)
         try:
             nv_msg = await ctx.send(
                 _(
@@ -88,24 +93,18 @@ class Negaverse(AdventureMixin):
                     offer=humanize_number(offering),
                     currency_name=currency_name,
                     bal=humanize_number(bal),
-                )
+                ),
+                view=view,
             )
-            start_adding_reactions(nv_msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-            pred = ReactionPredicate.yes_or_no(nv_msg, ctx.author)
-            try:
-                await ctx.bot.wait_for("reaction_add", check=pred, timeout=60)
-            except asyncio.TimeoutError:
-                ctx.command.reset_cooldown(ctx)
-                await self._clear_react(nv_msg)
-                lock.release()
-                return
-            if not pred.result:
+            await view.wait()
+            if not view.confirmed:
                 with contextlib.suppress(discord.HTTPException):
                     ctx.command.reset_cooldown(ctx)
                     await nv_msg.edit(
-                        content=_("{user} decides against visiting the negaverse... for now.").format(
-                            user=bold(ctx.author.display_name)
-                        )
+                        content=_("**{}** decides against visiting the negaverse... for now.").format(
+                            escape(ctx.author.display_name)
+                        ),
+                        view=None,
                     )
                     lock.release()
                     return await self._clear_react(nv_msg)
@@ -129,13 +128,13 @@ class Negaverse(AdventureMixin):
                     "The portal to the negaverse remains closed."
                 )
                 lock.release()
-                return await nv_msg.edit(content=entry_msg)
+                return await nv_msg.edit(content=entry_msg, view=None)
             else:
                 entry_msg = _(
                     "Shadowy hands reach out to take your offering from you and a swirling "
                     "black void slowly grows and engulfs you, transporting you to the negaverse."
                 )
-                await nv_msg.edit(content=entry_msg)
+                await nv_msg.edit(content=entry_msg, view=None)
                 await self._clear_react(nv_msg)
                 await bank.withdraw_credits(ctx.author, offering)
             if nega_set:
@@ -182,7 +181,7 @@ class Negaverse(AdventureMixin):
                 )
                 if items:
                     item_string = "\n".join([f"{v} x{i}" for v, i in items])
-                    looted = box(f"{item_string}", lang="css")
+                    looted = box(f"{item_string}", lang="ansi")
                     await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
                 loss_msg = _(", losing {loss} {currency_name} as {negachar} rifled through their belongings.").format(
                     loss=loss_string, currency_name=currency_name, negachar=bold(negachar)
@@ -197,7 +196,8 @@ class Negaverse(AdventureMixin):
                         author=bold(ctx.author.display_name),
                         negachar=bold(negachar),
                         loss_msg=loss_msg,
-                    )
+                    ),
+                    view=None,
                 )
                 ctx.command.reset_cooldown(ctx)
             elif roll < 10:
@@ -219,7 +219,7 @@ class Negaverse(AdventureMixin):
                     )
                     if items:
                         item_string = "\n".join([f"{v} {i}" for v, i in items])
-                        looted = box(f"{item_string}", lang="css")
+                        looted = box(f"{item_string}", lang="ansi")
                         await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
                 loss_msg = _(", losing {loss} {currency_name} as {negachar} rifled through their belongings.").format(
                     loss=loss_string, currency_name=currency_name, negachar=bold(negachar)
@@ -234,7 +234,8 @@ class Negaverse(AdventureMixin):
                         author=bold(ctx.author.display_name),
                         negachar=bold(negachar),
                         loss_msg=loss_msg,
-                    )
+                    ),
+                    view=None,
                 )
                 ctx.command.reset_cooldown(ctx)
             elif roll == 50 and versus < 50:
@@ -250,7 +251,8 @@ class Negaverse(AdventureMixin):
                         xp_gain=humanize_number(xp_won),
                         offering=humanize_number(offering),
                         currency_name=currency_name,
-                    )
+                    ),
+                    view=None,
                 )
                 with contextlib.suppress(Exception):
                     lock.release()
@@ -274,7 +276,8 @@ class Negaverse(AdventureMixin):
                         negachar=bold(negachar),
                         versus=versus,
                         xp_gain=humanize_number(xp_won),
-                    )
+                    ),
+                    view=None,
                 )
                 with contextlib.suppress(Exception):
                     lock.release()
@@ -294,7 +297,8 @@ class Negaverse(AdventureMixin):
                         roll=roll,
                         negachar=bold(negachar),
                         versus=versus,
-                    )
+                    ),
+                    view=None,
                 )
             else:
                 loss = round(bal / (random.randint(10, 25)))
@@ -315,7 +319,7 @@ class Negaverse(AdventureMixin):
                     )
                     if items:
                         item_string = "\n".join([f"{i}  - {v}" for v, i in items])
-                        looted = box(f"{item_string}", lang="css")
+                        looted = box(f"{item_string}", lang="ansi")
                         await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
                 loss_msg = _(", losing {loss} {currency_name} as {negachar} looted their backpack.").format(
                     loss=loss_string,
@@ -334,7 +338,8 @@ class Negaverse(AdventureMixin):
                         negachar=bold(negachar),
                         versus=versus,
                         loss_msg=loss_msg,
-                    )
+                    ),
+                    view=None,
                 )
                 ctx.command.reset_cooldown(ctx)
         finally:
@@ -370,3 +375,20 @@ class Negaverse(AdventureMixin):
 
                 if changed:
                     await self.config.user(ctx.author).set(await character.to_json(ctx, self.config))
+
+    @_negaverse_command.error
+    async def negaverse_error(self, ctx: commands.Context, error: Exception):
+        if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+            ctx.command.reset_cooldown(ctx)
+            currency_name = await bank.get_currency_name(
+                ctx.guild,
+            )
+            return await smart_embed(
+                ctx,
+                _(
+                    "**{author}**, you need to specify how many "
+                    "{currency_name} you are willing to offer to the gods for your success."
+                ).format(author=escape(ctx.author.display_name), currency_name=currency_name),
+            )
+        else:
+            await ctx.bot.on_command_error(ctx, error)

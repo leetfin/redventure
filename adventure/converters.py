@@ -10,17 +10,20 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple, Union
 
+import discord
+from discord.app_commands import Choice, Transformer
 from discord.ext.commands.converter import Converter
 from discord.ext.commands.errors import BadArgument
 from redbot.core import commands
 from redbot.core.commands import UserFeedbackCheckFailure
-from redbot.core.i18n import Translator
+from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import box
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
 
 from .charsheet import Character, Item
-from .constants import ORDER, RARITIES
+from .constants import DEV_LIST, ORDER, RARITIES, HeroClasses, Rarities, Skills
+from .helpers import smart_embed
 
 log = logging.getLogger("red.cogs.adventure")
 
@@ -132,7 +135,7 @@ class Stats(Converter):
             result["rarity"] = RARITY.search(argument).group(0)
         except AttributeError:
             raise BadArgument(_("No rarity was provided."))
-        for (key, value) in possible_stats.items():
+        for key, value in possible_stats.items():
             try:
                 stat = int(value.group(1))
                 if (
@@ -158,7 +161,10 @@ class ItemsConverter(Converter):
             log.exception("Error with the new character sheet", exc_info=exc)
             raise BadArgument
         try:
-            rarity = RARITY.match(argument.lower()).group(0)
+            rarity_match = RARITY.match(argument.lower()).group(0)
+            for r in Rarities:
+                if rarity_match.lower() in r:
+                    rarity = r
         except AttributeError:
             rarity = None
 
@@ -181,7 +187,7 @@ class ItemsConverter(Converter):
             lookup = list(i for x, i in c.backpack.items())
             return "all", lookup
         else:
-            lookup = list(i for x, i in c.backpack.items() if i.rarity == rarity)
+            lookup = list(i for x, i in c.backpack.items() if i.rarity is rarity)
             if lookup:
                 return "all", lookup
             raise BadArgument(_("You don't own any `{}` items.").format(argument))
@@ -201,12 +207,12 @@ class ItemsConverter(Converter):
                     _("You have too many items matching the name `{}`, please be more specific.").format(argument)
                 )
             items = ""
-            for (number, item) in enumerate(lookup):
+            for number, item in enumerate(lookup):
                 items += f"{number}. {str(item)} (owned {item.owned})\n"
 
             msg = await ctx.send(
                 _("Multiple items share that name, which one would you like?\n{items}").format(
-                    items=box(items, lang="css")
+                    items=box(items, lang="ansi")
                 )
             )
             emojis = ReactionPredicate.NUMBER_EMOJIS[: len(lookup)]
@@ -219,8 +225,35 @@ class ItemsConverter(Converter):
             return "single", [lookup[pred.result]]
 
 
-class ItemConverter(Converter):
-    async def convert(self, ctx, argument) -> Item:
+class ItemButton(discord.ui.Button):
+    def __init__(self, item: Item):
+        self.item = item
+        super().__init__(label=item.name)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_item = self.item
+        self.view.stop()
+        await interaction.response.edit_message(view=None)
+
+
+class ConfirmItemView(discord.ui.View):
+    def __init__(self, timeout: float, items: List[Item], author: discord.User):
+        super().__init__(timeout=timeout)
+        self.selected_item = None
+        for item in items:
+            self.add_item(ItemButton(item))
+        self.author = author
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message(_("You are not authorized to interact with this."), ephemeral=True)
+            return False
+        return True
+
+
+class ItemConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Item:
         try:
             c = await Character.from_json(
                 ctx,
@@ -254,31 +287,51 @@ class ItemConverter(Converter):
             raise BadArgument(_("`{}` doesn't seem to match any items you own.").format(argument))
         else:
             lookup = list(i for x, i in c.backpack.items() if str(i) in _temp_items)
-            if len(lookup) > 10:
+            if len(lookup) > 25:
                 raise BadArgument(
                     _("You have too many items matching the name `{}`, please be more specific.").format(argument)
                 )
             items = ""
-            for (number, item) in enumerate(lookup):
+            view = ConfirmItemView(60, lookup, ctx.author)
+            for number, item in enumerate(lookup):
                 items += f"{number}. {str(item)} (owned {item.owned})\n"
 
-            msg = await ctx.send(
+            await ctx.send(
                 _("Multiple items share that name, which one would you like?\n{items}").format(
-                    items=box(items, lang="css")
-                )
+                    items=box(items, lang="ansi")
+                ),
+                view=view,
             )
-            emojis = ReactionPredicate.NUMBER_EMOJIS[: len(lookup)]
-            start_adding_reactions(msg, emojis)
-            pred = ReactionPredicate.with_emojis(emojis, msg, user=ctx.author)
-            try:
-                await ctx.bot.wait_for("reaction_add", check=pred, timeout=30)
-            except asyncio.TimeoutError:
+            await view.wait()
+            if not view.selected_item:
                 raise BadArgument(_("Alright then."))
-            return lookup[pred.result]
+            return view.selected_item
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Item:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        ctx = await interaction.client.get_context(interaction)
+        try:
+            c = await Character.from_json(
+                ctx,
+                ctx.bot.get_cog("Adventure").config,
+                ctx.author,
+                ctx.bot.get_cog("Adventure")._daily_bonus,
+            )
+        except Exception as exc:
+            log.exception("Error with the new character sheet", exc_info=exc)
+            return []
+        return [Choice(name=str(x), value=x.name) for i, x in c.backpack.items() if current.lower() in str(x).lower()][
+            :25
+        ]
 
 
-class EquipableItemConverter(Converter):
-    async def convert(self, ctx, argument) -> Item:
+class EquipableItemConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Item:
         try:
             c = await Character.from_json(
                 ctx,
@@ -338,12 +391,12 @@ class EquipableItemConverter(Converter):
                     _("You have too many items matching the name `{}`, please be more specific.").format(argument)
                 )
             items = ""
-            for (number, item) in enumerate(lookup):
+            for number, item in enumerate(lookup):
                 items += f"{number}. {str(item)} (owned {item.owned})\n"
 
             msg = await ctx.send(
                 _("Multiple items share that name, which one would you like?\n{items}").format(
-                    items=box(items, lang="css")
+                    items=box(items, lang="ansi")
                 )
             )
             emojis = ReactionPredicate.NUMBER_EMOJIS[: len(lookup)]
@@ -355,9 +408,41 @@ class EquipableItemConverter(Converter):
                 raise BadArgument(_("Alright then."))
             return lookup[pred.result]
 
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Item:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
 
-class EquipmentConverter(Converter):
-    async def convert(self, ctx, argument) -> Union[Item, List[Item]]:
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        ctx = await interaction.client.get_context(interaction)
+        try:
+            c = await Character.from_json(
+                ctx,
+                ctx.bot.get_cog("Adventure").config,
+                ctx.author,
+                ctx.bot.get_cog("Adventure")._daily_bonus,
+            )
+        except Exception as exc:
+            log.exception("Error with the new character sheet", exc_info=exc)
+            raise BadArgument
+        equipped_items = set()
+        for slots in ORDER:
+            if slots == "two handed":
+                continue
+            item = getattr(c, slots, None)
+            if item:
+                equipped_items.add(str(item))
+        lookup = [
+            Choice(name=str(i), value=i.name)
+            for x, i in c.backpack.items()
+            if current.lower() in x.lower() and str(i) not in equipped_items
+        ]
+        return lookup[:25]
+
+
+class EquipmentConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Union[Item, List[Item]]:
         try:
             c = await Character.from_json(
                 ctx,
@@ -418,12 +503,12 @@ class EquipmentConverter(Converter):
                     _("You have too many items matching the name `{}`, please be more specific").format(argument)
                 )
             items = ""
-            for (number, item) in enumerate(lookup):
+            for number, item in enumerate(lookup):
                 items += f"{number}. {str(item)} (owned {item.owned})\n"
 
             msg = await ctx.send(
                 _("Multiple items share that name, which one would you like?\n{items}").format(
-                    items=box(items, lang="css")
+                    items=box(items, lang="ansi")
                 )
             )
             emojis = ReactionPredicate.NUMBER_EMOJIS[: len(lookup)]
@@ -434,6 +519,28 @@ class EquipmentConverter(Converter):
             except asyncio.TimeoutError:
                 raise BadArgument(_("Alright then."))
             return lookup[pred.result]
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Union[Item, List[Item]]:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        ctx = await interaction.client.get_context(interaction)
+        try:
+            c = await Character.from_json(
+                ctx,
+                ctx.bot.get_cog("Adventure").config,
+                ctx.author,
+                ctx.bot.get_cog("Adventure")._daily_bonus,
+            )
+        except Exception as exc:
+            log.exception("Error with the new character sheet", exc_info=exc)
+            raise BadArgument
+        choices = [
+            Choice(name=str(i), value=i.name) for i in c.get_current_equipment() if current.lower() in str(i).lower()
+        ]
+        return choices[:25]
 
 
 class ThemeSetMonterConverter(Converter):
@@ -512,22 +619,119 @@ class ThemeSetPetConverter(Converter):
         }
 
 
-class SlotConverter(Converter):
-    async def convert(self, ctx, argument) -> Optional[str]:
+class SlotConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[str]:
         if argument:
             slot = argument.lower()
             if slot not in ORDER:
                 raise BadArgument
         return argument
 
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[str]:
+        ctx = await interaction.client.get_context(interaction)
+        return cls.convert(ctx, argument)
 
-class RarityConverter(Converter):
-    async def convert(self, ctx, argument) -> Optional[str]:
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        return [Choice(name=i, value=i) for i in ORDER if current.lower() in i]
+
+
+class RarityConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[str]:
         if argument:
             rarity = argument.lower()
             if rarity not in RARITIES:
                 raise BadArgument
         return argument
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[str]:
+        ctx = await interaction.client.get_context(interaction)
+        return cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        return [Choice(name=i, value=i) for i in RARITIES if current.lower() in i]
+
+
+class SkillConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Skills:
+        ret = None
+        att = ["attack", "att", "atk"]
+        cha = ["diplomacy", "charisma", "cha", "dipl"]
+        intel = ["intelligence", "intellect", "int", "magic"]
+        if argument.lower() in att:
+            ret = Skills("attack")
+        if argument.lower() in cha:
+            ret = Skills("charisma")
+        if argument.lower() in intel:
+            ret = Skills("intelligence")
+        if argument.lower() == "reset":
+            ret = Skills("reset")
+        if ret is None:
+            raise BadArgument(_("`{argument}` is not an available skill.").format(argument=argument))
+        return ret
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Skills:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        choices = [Choice(name=s.name.title(), value=s.value) for s in Skills if current.lower() in s.name]
+        return choices
+
+
+class ChallengeConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> str:
+        if ctx.author.id not in (*ctx.bot.owner_ids, *DEV_LIST):
+            return ""
+        cog = ctx.bot.get_cog("Adventure")
+        monsters, monster_stats, transcended = await cog.update_monster_roster(ctx)
+        if argument not in monsters:
+            return ""
+        return argument
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> str:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        if interaction.user.id not in (*interaction.client.owner_ids, *DEV_LIST):
+            return []
+        cog = interaction.client.get_cog("Adventure")
+        ctx = await interaction.client.get_context(interaction)
+        monsters, monster_stats, transcended = await cog.update_monster_roster(ctx)
+        return [Choice(name=m, value=m) for m in monsters if current.lower() in m.lower()][:25]
+
+
+class HeroClassConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[HeroClasses]:
+        available_classes = HeroClasses.class_names()
+        names = list(available_classes.keys()) + list(available_classes.values())
+        if argument.lower() not in names:
+            return None
+        try:
+            hc = HeroClasses.from_name(argument)
+        except ValueError:
+            await smart_embed(ctx, _("{} may be a class somewhere, but not on my watch.").format(argument))
+            return None
+        return hc
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[HeroClasses]:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        if interaction.guild is not None:
+            await set_contextual_locales_from_guild(interaction.client, interaction.guild)
+        return [Choice(name=c.class_name, value=c.value) for c in HeroClasses if current.lower() in c.class_name]
 
 
 class DayConverter(Converter):

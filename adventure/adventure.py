@@ -8,7 +8,7 @@ import time
 from abc import ABC
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Literal, MutableMapping
+from typing import Literal, MutableMapping, Optional, Union
 
 import discord
 from discord.ext.commands import CheckFailure
@@ -19,7 +19,7 @@ from redbot.core.data_manager import bundled_data_path, cog_data_path
 from redbot.core.errors import BalanceTooHigh
 from redbot.core.i18n import Translator, cog_i18n
 from redbot.core.utils import AsyncIter
-from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize_number, humanize_timedelta, pagify
+from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize_number, pagify
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
 
@@ -27,11 +27,12 @@ from .adventureresult import AdventureResults
 from .adventureset import AdventureSetCommands
 from .backpack import BackPackCommands
 from .bank import bank
-from .cart import AdventureCart
+from .cart import Trader
 from .character import CharacterCommands
 from .charsheet import Character, calculate_sp, has_funds
 from .class_abilities import ClassAbilities
-from .converters import ArgParserFailure
+from .constants import DEV_LIST, ANSITextColours, HeroClasses, Rarities, Treasure
+from .converters import ArgParserFailure, ChallengeConverter
 from .defaults import default_global, default_guild, default_user
 from .dev import DevCommands
 from .economy import EconomyCommands
@@ -68,7 +69,6 @@ class Adventure(
     BackPackCommands,
     CharacterCommands,
     ClassAbilities,
-    AdventureCart,
     DevCommands,
     EconomyCommands,
     LeaderboardCommands,
@@ -77,7 +77,7 @@ class Adventure(
     Negaverse,
     RebirthCommands,
     ThemesetCommands,
-    commands.Cog,
+    commands.GroupCog,
     metaclass=CompositeMetaClass,
 ):
     """Adventure, derived from the Goblins Adventure cog by locastan."""
@@ -93,7 +93,7 @@ class Adventure(
             user_id
         ).clear()  # This will only ever touch the separate currency, leaving bot economy to be handled by core.
 
-    __version__ = "3.5.8"
+    __version__ = "4.0.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -187,6 +187,7 @@ class Adventure(
         self.MONSTER_NOW: dict = None
         self.LOCATIONS: list = None
         self.PETS: dict = None
+        self.ACTION_RESPONSE: dict = None
 
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
@@ -195,6 +196,12 @@ class Adventure(
         log.debug("Creating Task")
         self._init_task = self.bot.loop.create_task(self.initialize())
         self._ready_event = asyncio.Event()
+        # This is done to prevent having a top level text command named "start"
+        # in order to keep the slash command variant called `/adventure start`
+        # which is a lot better than `/adventure adventure`
+        self.app_command.remove_command("adventure")
+        self._adventure.app_command.name = "start"
+        self.app_command.add_command(self._adventure.app_command)
 
     async def cog_before_invoke(self, ctx: commands.Context):
         await self._ready_event.wait()
@@ -232,6 +239,7 @@ class Adventure(
             equipment_fp = get_path(self) / f"{theme}" / "equipment.json"
             suffixes_fp = get_path(self) / f"{theme}" / "suffixes.json"
             set_bonuses = get_path(self) / f"{theme}" / "set_bonuses.json"
+            action_response = get_path(self) / f"{theme}" / "action_response.json"
             files = {
                 "pets": pets_fp,
                 "attr": attribs_fp,
@@ -246,8 +254,9 @@ class Adventure(
                 "equipment": equipment_fp,
                 "suffixes": suffixes_fp,
                 "set_bonuses": set_bonuses,
+                "action_response": action_response,
             }
-            for (name, file) in files.items():
+            for name, file in files.items():
                 if not file.exists():
                     files[name] = bundled_data_path(self) / "default" / f"{file.name}"
 
@@ -277,6 +286,8 @@ class Adventure(
                 self.SUFFIXES = json.load(f)
             with files["set_bonuses"].open("r") as f:
                 self.SET_BONUSES = json.load(f)
+            with files["action_response"].open("r") as f:
+                self.ACTION_RESPONSE = json.load(f)
 
             if not all(
                 i
@@ -311,7 +322,7 @@ class Adventure(
         await self._ready_event.wait()
         while self is self.bot.get_cog("Adventure"):
             to_delete = []
-            for (msg_id, task) in self.tasks.items():
+            for msg_id, task in self.tasks.items():
                 if task.done():
                     to_delete.append(msg_id)
             for task in to_delete:
@@ -333,23 +344,22 @@ class Adventure(
                     user_equipped_items = adventurers_data[user]["items"]
                     for slot in user_equipped_items.keys():
                         if user_equipped_items[slot]:
-                            for (slot_item_name, slot_item) in list(user_equipped_items[slot].items())[:1]:
+                            for slot_item_name, slot_item in list(user_equipped_items[slot].items())[:1]:
                                 new_name, slot_item = self._convert_item_migration(slot_item_name, slot_item)
                                 adventurers_data[user]["items"][slot] = {new_name: slot_item}
                     if "backpack" not in adventurers_data[user]:
                         adventurers_data[user]["backpack"] = {}
-                    for (backpack_item_name, backpack_item) in adventurers_data[user]["backpack"].items():
+                    for backpack_item_name, backpack_item in adventurers_data[user]["backpack"].items():
                         new_name, backpack_item = self._convert_item_migration(backpack_item_name, backpack_item)
                         new_backpack[new_name] = backpack_item
                     adventurers_data[user]["backpack"] = new_backpack
                     if "loadouts" not in adventurers_data[user]:
                         adventurers_data[user]["loadouts"] = {}
                     try:
-                        for (loadout_name, loadout) in adventurers_data[user]["loadouts"].items():
-                            for (slot, equipped_loadout) in loadout.items():
+                        for loadout_name, loadout in adventurers_data[user]["loadouts"].items():
+                            for slot, equipped_loadout in loadout.items():
                                 new_loadout[slot] = {}
-                                for (loadout_item_name, loadout_item) in equipped_loadout.items():
-
+                                for loadout_item_name, loadout_item in equipped_loadout.items():
                                     new_name, loadout_item = self._convert_item_migration(
                                         loadout_item_name, loadout_item
                                     )
@@ -369,7 +379,7 @@ class Adventure(
                     if "loadouts" not in adventurers_data[user]:
                         adventurers_data[user]["loadouts"] = {}
                     try:
-                        for (loadout_name, loadout) in adventurers_data[user]["loadouts"].items():
+                        for loadout_name, loadout in adventurers_data[user]["loadouts"].items():
                             if loadout_name in {
                                 "head",
                                 "neck",
@@ -476,7 +486,7 @@ class Adventure(
             return True
         return bool(ctx.guild is None and await bank.is_global())
 
-    def get_lock(self, member: discord.User):
+    def get_lock(self, member: discord.User) -> asyncio.Lock:
         if member.id not in self.locks:
             self.locks[member.id] = asyncio.Lock()
         return self.locks[member.id]
@@ -486,22 +496,23 @@ class Adventure(
         delta = timedelta(minutes=6)
         with contextlib.suppress(asyncio.CancelledError):
             while True:
-                async for guild_id, session in AsyncIter(self._sessions.copy(), steps=100):
-                    if session.start_time + delta > datetime.now():
+                async for guild_id, session in AsyncIter(self._sessions.copy().items(), steps=100):
+                    if datetime.now() > (session.start_time + delta):
                         if guild_id in self._sessions:
+                            log.debug("Removing old session from %s", guild_id)
                             del self._sessions[guild_id]
                 await asyncio.sleep(5)
 
     @commands.cooldown(rate=1, per=5, type=commands.BucketType.guild)
-    @commands.command(name="adventure", aliases=["a"])
+    @commands.hybrid_command(name="adventure", aliases=["a"])
     @commands.bot_has_permissions(add_reactions=True)
     @commands.guild_only()
-    async def _adventure(self, ctx: commands.Context, *, challenge=None):
+    async def _adventure(self, ctx: commands.Context, *, challenge: Optional[ChallengeConverter] = None):
         """This will send you on an adventure!
 
         You play by reacting with the offered emojis.
         """
-
+        await ctx.defer()
         if ctx.guild.id in self._sessions and self._sessions[ctx.guild.id].finished is False:
             adventure_obj = self._sessions[ctx.guild.id]
             link = adventure_obj.message.jump_url
@@ -535,13 +546,11 @@ class Adventure(
 
         cooldown_time = guild_settings["cooldown_timer_manual"]
 
-        if cooldown + cooldown_time > time.time():
-            cooldown_time = cooldown + cooldown_time - time.time()
+        if cooldown + cooldown_time > time.time() and ctx.author.id not in DEV_LIST:
+            cooldown_time = int(cooldown + cooldown_time)
             return await smart_embed(
                 ctx,
-                _("No heroes are ready to depart in an adventure, try again in {}.").format(
-                    humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                ),
+                _("No heroes are ready to depart in an adventure, try again <t:{}:R>.").format(cooldown_time),
             )
 
         if challenge and not (is_dev(ctx.author) or await ctx.bot.is_owner(ctx.author)):
@@ -569,7 +578,7 @@ class Adventure(
             return
         reward_copy = reward.copy()
         send_message = ""
-        for (userid, rewards) in reward_copy.items():
+        for userid, rewards in reward_copy.items():
             if rewards:
                 user = ctx.guild.get_member(userid)  # bot.get_user breaks sometimes :ablobsweats:
                 if user is None:
@@ -590,7 +599,7 @@ class Adventure(
                     except Exception as exc:
                         log.exception("Error with the new character sheet", exc_info=exc)
                         continue
-                    if c.heroclass["name"] != "Ranger" and c.heroclass["ability"]:
+                    if c.hc is not HeroClasses.ranger and c.heroclass["ability"]:
                         c.heroclass["ability"] = False
                     if c.last_currency_check + 600 < time.time() or c.bal > c.last_known_currency:
                         c.last_known_currency = await bank.get_balance(user)
@@ -788,7 +797,6 @@ class Adventure(
         return choice
 
     async def update_monster_roster(self, ctx: commands.Context):
-
         try:
             c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
             failed = False
@@ -846,7 +854,8 @@ class Adventure(
             if monster_roster[challenge]["boss"]:
                 timer = 60 * 5
                 self.bot.dispatch("adventure_boss", ctx)
-                text = box(_("\n [{} Alarm!]").format(new_challenge), lang="css")
+                challenge_str = _("[{challenge} Alarm!]").format(challenge=new_challenge)
+                text = box(ANSITextColours.red.as_str(challenge_str), lang="ansi")
             elif monster_roster[challenge]["miniboss"]:
                 timer = 60 * 3
                 self.bot.dispatch("adventure_miniboss", ctx)
@@ -866,8 +875,11 @@ class Adventure(
                 new_challenge = challenge.replace("Ascended", "")
             timer = 60 * 3
             no_monster = random.randint(0, 100) == 25
+        # if ctx.author.id in DEV_LIST:
+        # timer = 20
         self._sessions[ctx.guild.id] = GameSession(
             ctx=ctx,
+            cog=self,
             challenge=new_challenge if not no_monster else None,
             attribute=attribute if not no_monster else None,
             guild=ctx.guild,
@@ -940,9 +952,9 @@ class Adventure(
                     embed.colour = discord.Colour.dark_red()
                     if session.monster["image"]:
                         embed.set_image(url=session.monster["image"])
-                    adventure_msg = await ctx.send(embed=embed)
+                    adventure_msg = await ctx.send(embed=embed, view=session)
                 else:
-                    adventure_msg = await ctx.send(f"{adventure_msg}\n{dragon_text}")
+                    adventure_msg = await ctx.send(f"{adventure_msg}\n{dragon_text}", view=session)
                 timeout = 60 * 5
 
             elif session.miniboss:
@@ -951,18 +963,18 @@ class Adventure(
                     embed.colour = discord.Colour.dark_green()
                     if session.monster["image"]:
                         embed.set_image(url=session.monster["image"])
-                    adventure_msg = await ctx.send(embed=embed)
+                    adventure_msg = await ctx.send(embed=embed, view=session)
                 else:
-                    adventure_msg = await ctx.send(f"{adventure_msg}\n{basilisk_text}")
+                    adventure_msg = await ctx.send(f"{adventure_msg}\n{basilisk_text}", view=session)
                 timeout = 60 * 3
             else:
                 if use_embeds:
                     embed.description = f"{adventure_msg}\n{normal_text}"
                     if session.monster["image"]:
                         embed.set_thumbnail(url=session.monster["image"])
-                    adventure_msg = await ctx.send(embed=embed)
+                    adventure_msg = await ctx.send(embed=embed, view=session)
                 else:
-                    adventure_msg = await ctx.send(f"{adventure_msg}\n{normal_text}")
+                    adventure_msg = await ctx.send(f"{adventure_msg}\n{normal_text}", view=session)
                 timeout = 60 * 2
         else:
             embed = discord.Embed(colour=discord.Colour.blurple())
@@ -978,14 +990,15 @@ class Adventure(
             )
             if use_embeds:
                 embed.description = f"{adventure_msg}\n{obscured_text}"
-                adventure_msg = await ctx.send(embed=embed)
+                adventure_msg = await ctx.send(embed=embed, view=session)
             else:
-                adventure_msg = await ctx.send(f"{adventure_msg}\n{obscured_text}")
+                adventure_msg = await ctx.send(f"{adventure_msg}\n{obscured_text}", view=session)
 
         session.message_id = adventure_msg.id
         session.message = adventure_msg
-        start_adding_reactions(adventure_msg, self._adventure_actions)
-        timer = await self._adv_countdown(ctx, session.timer, "Adventure ending")
+        # start_adding_reactions(adventure_msg, self._adventure_actions)
+        timer = await self._adv_countdown(ctx, session.timer, "Time remaining")
+
         self.tasks[adventure_msg.id] = timer
         try:
             await asyncio.wait_for(timer, timeout=timeout + 5)
@@ -994,8 +1007,12 @@ class Adventure(
         except Exception as exc:
             timer.cancel()
             log.exception("Error with the countdown timer", exc_info=exc)
-
-        return await self._result(ctx, adventure_msg)
+        await adventure_msg.edit(view=None)
+        try:
+            return await self._result(ctx, adventure_msg)
+        except Exception:
+            log.exception("Error in results")
+            raise
 
     async def has_perm(self, user):
         if hasattr(self.bot, "allowed_by_whitelist_blacklist"):
@@ -1057,14 +1074,6 @@ class Adventure(
                     (timer, done, sremain) = self._adventure_countdown[guild.id]
                     if sremain > 3:
                         await self._handle_adventure(reaction, user)
-        if guild.id in self._current_traders:
-            if reaction.message.id == self._current_traders[guild.id]["msg"] and not self.in_adventure(user=user):
-                if user in self._current_traders[guild.id]["users"]:
-                    return
-                if guild.id in self._trader_countdown:
-                    (timer, done, sremain) = self._trader_countdown[guild.id]
-                    if sremain > 3:
-                        await self._handle_cart(reaction, user)
 
     async def _handle_adventure(self, reaction: discord.Reaction, user: discord.Member):
         action = {v: k for k, v in self._adventure_controls.items()}[str(reaction.emoji)]
@@ -1097,7 +1106,7 @@ class Adventure(
                 return
             if restricted:
                 all_users = []
-                for (guild_id, guild_session) in self._sessions.items():
+                for guild_id, guild_session in self._sessions.items():
                     guild_users_in_game = (
                         guild_session.fight
                         + guild_session.magic
@@ -1124,8 +1133,191 @@ class Adventure(
             else:
                 getattr(session, action).append(user)
 
+    async def get_treasure(
+        self,
+        session: GameSession,
+        hp: int,
+        dipl: int,
+        slain: bool = False,
+        persuaded: bool = False,
+        failed: bool = False,
+        crit_bonus: bool = False,
+    ) -> Treasure:
+        if session.no_monster:
+            available_loot = [
+                Treasure(_set=1),
+                Treasure(ascended=1, _set=2),
+                Treasure(epic=3, legendary=1),
+                Treasure(legendary=3, ascended=2),
+                Treasure(epic=1, legendary=3, _set=1),
+                Treasure(epic=1, legendary=2, ascended=1),
+                Treasure(epic=1, legendary=5, ascended=2, _set=1),
+                Treasure(epic=1, legendary=5, ascended=1, _set=1),
+                Treasure(epic=1, legendary=1, ascended=1, _set=1),
+            ]
+            treasure = random.choice(available_loot)
+            return treasure
+        treasure = Treasure()  # empty treasure container
+        if session.easy_mode:
+            if (slain or persuaded) and not failed:
+                roll = random.randint(1, 10)
+                monster_amount = hp + dipl if slain and persuaded else hp if slain else dipl
+                if session.transcended:
+                    if session.boss and not session.no_monster:
+                        available_loot = [
+                            Treasure(epic=1, legendary=5, ascended=2, _set=1),
+                            Treasure(ascended=1, _set=1),
+                        ]
+                    else:
+                        available_loot = [
+                            Treasure(epic=1, legendary=5, ascended=1, _set=1),
+                            Treasure(epic=1, legendary=3, _set=1),
+                            Treasure(epic=1, legendary=1, ascended=1, _set=1),
+                            Treasure(_set=1),
+                        ]
+                    treasure = random.choice(available_loot)
+                elif session.boss:  # rewards 60:30:10 Epic Legendary Gear Set items
+                    # available_loot = [[0, 0, 3, 1, 0, 0], [0, 0, 1, 2, 1, 0], [0, 0, 0, 3, 2, 0]]
+                    available_loot = [
+                        Treasure(epic=3, legendary=1),
+                        Treasure(epic=1, legendary=2, ascended=1),
+                        Treasure(legendary=3, ascended=2),
+                    ]
+                    treasure = random.choice(available_loot)
+                elif session.miniboss:  # rewards 50:50 rare:normal chest for killing something like the basilisk
+                    # available_loot = [[1, 1, 1, 0, 0, 0], [0, 0, 1, 1, 1, 0], [0, 0, 2, 2, 0, 0], [0, 1, 0, 2, 1, 0]]
+                    available_loot = [
+                        Treasure(normal=1, rare=1, epic=1),
+                        Treasure(epic=1, legendary=1, ascended=1),
+                        Treasure(epic=2, legendary=2),
+                        Treasure(rare=1, legendary=2, ascended=1),
+                    ]
+                    treasure = random.choice(available_loot)
+                elif monster_amount >= 700:  # super hard stuff
+                    # available_loot = [[0, 0, 1, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 0, 1, 1, 0]]
+                    available_loot = [
+                        Treasure(epic=1),
+                        Treasure(rare=1),
+                        Treasure(legendary=1, ascended=1),
+                    ]
+                    if roll <= 7:
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 500:  # rewards 50:50 rare:epic chest for killing hard stuff.
+                    # available_loot = [[0, 0, 1, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0]]
+                    available_loot = [
+                        Treasure(epic=1),
+                        Treasure(rare=1),
+                        Treasure(rare=1, epic=1),
+                    ]
+                    if roll <= 5:
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 300:  # rewards 50:50 rare:normal chest for killing hardish stuff
+                    # available_loot = [[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]]
+                    available_loot = [
+                        Treasure(normal=1),
+                        Treasure(rare=1),
+                        Treasure(normal=1, rare=1),
+                    ]
+                    if roll <= 2:
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 80:  # small chance of a normal chest on killing stuff that's not terribly weak
+                    if roll == 1:
+                        # treasure = [1, 0, 0, 0, 0, 0]
+                        treasure = Treasure(normal=1)
+
+                if session.boss:  # always rewards at least an epic chest.
+                    # roll for legendary chest
+                    roll = random.randint(1, 100)
+                    if roll <= 10:
+                        treasure.ascended += 1
+                    elif roll <= 20:
+                        treasure.legendary += 1
+                    else:
+                        treasure.epic += 1
+                if crit_bonus:
+                    treasure.normal += 1
+                if not treasure:
+                    treasure = Treasure()
+        else:
+            if (slain or persuaded) and not failed:
+                roll = random.randint(1, 10)
+                monster_amount = hp + dipl if slain and persuaded else hp if slain else dipl
+                if session.transcended:
+                    if session.boss and not session.no_monster:
+                        # available_loot = [[0, 0, 1, 5, 4, 2], [0, 0, 3, 4, 5, 2],]
+                        available_loot = [
+                            Treasure(epic=1, legendary=5, ascended=4, _set=2),
+                            Treasure(epic=3, legendary=4, ascended=5, _set=2),
+                        ]
+                    else:
+                        # available_loot = [[0, 0, 1, 4, 2, 1], [0, 0, 1, 1, 2, 1],]
+                        available_loot = [
+                            Treasure(epic=1, legendary=4, ascended=2, _set=1),
+                            Treasure(epic=1, legendary=1, ascended=2, _set=1),
+                        ]
+                    treasure = random.choice(available_loot)
+                elif session.boss:  # rewards 60:30:10 Epic Legendary Gear Set items
+                    # available_loot = [[0, 0, 1, 2, 1, 0], [0, 0, 0, 3, 2, 0]]
+                    available_loot = [
+                        Treasure(epic=1, legendary=2, ascended=1),
+                        Treasure(legendary=3, ascended=2),
+                    ]
+                    treasure = random.choice(available_loot)
+                elif session.miniboss:  # rewards 50:50 rare:normal chest for killing something like the basilisk
+                    # treasure = random.choice([[0, 0, 2, 2, 3, 0], [0, 1, 0, 2, 2, 0]])
+                    available_loot = [
+                        Treasure(epic=2, legendary=2, ascended=3),
+                        Treasure(rare=1, legendary=2, ascended=2),
+                    ]
+                    treasure = random.choice(available_loot)
+                elif monster_amount >= 700:  # super hard stuff
+                    available_loot = [
+                        Treasure(legendary=2, ascended=2),
+                        Treasure(rare=1, epic=2, legendary=1),
+                    ]
+                    if roll <= 7:
+                        # treasure = random.choice([[0, 0, 0, 2, 2, 0], [0, 1, 2, 1, 0, 0]])
+
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 500:  # rewards 50:50 rare:epic chest for killing hard stuff.
+                    # available_loot = [[0, 0, 2, 0, 0, 0], [0, 1, 2, 1, 0, 0]]
+                    available_loot = [
+                        Treasure(epic=2),
+                        Treasure(rare=1, epic=2, legendary=1),
+                    ]
+                    if roll <= 5:
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 300:  # rewards 50:50 rare:normal chest for killing hardish stuff
+                    available_loot = [[0, 2, 0, 0, 0, 0], [1, 2, 1, 0, 0, 0]]
+                    available_loot = [
+                        Treasure(rare=2),
+                        Treasure(normal=1, rare=2, epic=1),
+                    ]
+                    if roll <= 2:
+                        treasure = random.choice(available_loot)
+                elif monster_amount >= 80:  # small chance of a normal chest on killing stuff that's not terribly weak
+                    if roll == 1:
+                        treasure = Treasure(normal=3)
+                        # treasure = [3, 0, 0, 0, 0, 0]
+
+                if session.boss:  # always rewards at least an epic chest.
+                    # roll for legendary chest
+                    roll = random.randint(1, 100)
+                    if roll <= 30:
+                        treasure.ascended += 1
+                    elif roll <= 50:
+                        treasure.legendary += 1
+                    else:
+                        treasure.epic += 1
+                if crit_bonus:
+                    treasure.normal += 1
+                if not treasure:
+                    treasure = Treasure()
+        return treasure
+
     async def _result(self, ctx: commands.Context, message: discord.Message):
         if ctx.guild.id not in self._sessions:
+            log.debug("Session not found for %s", ctx.guild.id)
             return
         calc_msg = await ctx.send(_("Calculating..."))
         attack = 0
@@ -1177,18 +1369,7 @@ class Adventure(
             [", ".join(pray_name_list[:-1]), pray_name_list[-1]] if len(pray_name_list) > 2 else pray_name_list
         )
         if session.no_monster:
-            avaliable_loot = [
-                [0, 0, 1, 5, 2, 1],
-                [0, 0, 0, 0, 1, 2],
-                [0, 0, 1, 5, 1, 1],
-                [0, 0, 1, 3, 0, 1],
-                [0, 0, 1, 1, 1, 1],
-                [0, 0, 0, 0, 0, 1],
-                [0, 0, 3, 1, 0, 0],
-                [0, 0, 1, 2, 1, 0],
-                [0, 0, 0, 3, 2, 0],
-            ]
-            treasure = random.choice(avaliable_loot)
+            treasure = await self.get_treasure(session, 0, 0)
 
             session.participants = set(fight_list + magic_list + talk_list + pray_list + run_list + fumblelist)
 
@@ -1209,7 +1390,7 @@ class Adventure(
                 treasure,
             )
             parsed_users = []
-            for (action_name, action) in participants.items():
+            for action_name, action in participants.items():
                 for user in action:
                     try:
                         c = await Character.from_json(ctx, self.config, user, self._daily_bonus)
@@ -1268,6 +1449,7 @@ class Adventure(
         diplomacy = int(diplomacy)
         slain = dmg_dealt >= int(hp)
         persuaded = diplomacy >= int(dipl)
+        crit_bonus = len(critlist) != 0
         damage_str = ""
         diplo_str = ""
         if dmg_dealt > 0:
@@ -1294,7 +1476,10 @@ class Adventure(
         await calc_msg.delete()
         text = ""
         success = False
-        treasure = [0, 0, 0, 0, 0, 0]
+        if (slain or persuaded) and not failed:
+            success = True
+        # treasure = [0, 0, 0, 0, 0, 0]
+        treasure = await self.get_treasure(session, hp, dipl, slain, persuaded, failed, crit_bonus)
         if run_list:
             users = run_list
             for user in users:
@@ -1319,106 +1504,6 @@ class Adventure(
                             await bank.withdraw_credits(user, loss)
                         else:
                             await bank.set_balance(user, 0)
-        if session.easy_mode:
-            if (slain or persuaded) and not failed:
-                success = True
-                roll = random.randint(1, 10)
-                monster_amount = hp + dipl if slain and persuaded else hp if slain else dipl
-                if session.transcended:
-                    if session.boss and not session.no_monster:
-                        avaliable_loot = [
-                            [0, 0, 1, 5, 2, 1],
-                            [0, 0, 0, 0, 1, 1],
-                        ]
-                    else:
-                        avaliable_loot = [
-                            [0, 0, 1, 5, 1, 1],
-                            [0, 0, 1, 3, 0, 1],
-                            [0, 0, 1, 1, 1, 1],
-                            [0, 0, 0, 0, 0, 1],
-                        ]
-                    treasure = random.choice(avaliable_loot)
-                elif session.boss:  # rewards 60:30:10 Epic Legendary Gear Set items
-                    avaliable_loot = [[0, 0, 3, 1, 0, 0], [0, 0, 1, 2, 1, 0], [0, 0, 0, 3, 2, 0]]
-                    treasure = random.choice(avaliable_loot)
-                elif session.miniboss:  # rewards 50:50 rare:normal chest for killing something like the basilisk
-                    treasure = random.choice(
-                        [[1, 1, 1, 0, 0, 0], [0, 0, 1, 1, 1, 0], [0, 0, 2, 2, 0, 0], [0, 1, 0, 2, 1, 0]]
-                    )
-                elif monster_amount >= 700:  # super hard stuff
-                    if roll <= 7:
-                        treasure = random.choice([[0, 0, 1, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 0, 0, 1, 1, 0]])
-                elif monster_amount >= 500:  # rewards 50:50 rare:epic chest for killing hard stuff.
-                    if roll <= 5:
-                        treasure = random.choice([[0, 0, 1, 0, 0, 0], [0, 1, 0, 0, 0, 0], [0, 1, 1, 0, 0, 0]])
-                elif monster_amount >= 300:  # rewards 50:50 rare:normal chest for killing hardish stuff
-                    if roll <= 2:
-                        treasure = random.choice([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]])
-                elif monster_amount >= 80:  # small chance of a normal chest on killing stuff that's not terribly weak
-                    if roll == 1:
-                        treasure = [1, 0, 0, 0, 0, 0]
-
-                if session.boss:  # always rewards at least an epic chest.
-                    # roll for legendary chest
-                    roll = random.randint(1, 100)
-                    if roll <= 10:
-                        treasure[4] += 1
-                    elif roll <= 20:
-                        treasure[3] += 1
-                    else:
-                        treasure[2] += 1
-                if len(critlist) != 0:
-                    treasure[0] += 1
-                if treasure == [0, 0, 0, 0, 0, 0]:
-                    treasure = False
-        else:
-            if (slain or persuaded) and not failed:
-                success = True
-                roll = random.randint(1, 10)
-                monster_amount = hp + dipl if slain and persuaded else hp if slain else dipl
-                if session.transcended:
-                    if session.boss and not session.no_monster:
-                        avaliable_loot = [
-                            [0, 0, 1, 5, 4, 2],
-                            [0, 0, 3, 4, 5, 2],
-                        ]
-                    else:
-                        avaliable_loot = [
-                            [0, 0, 1, 4, 2, 1],
-                            [0, 0, 1, 1, 2, 1],
-                        ]
-                    treasure = random.choice(avaliable_loot)
-                elif session.boss:  # rewards 60:30:10 Epic Legendary Gear Set items
-                    avaliable_loot = [[0, 0, 1, 2, 1, 0], [0, 0, 0, 3, 2, 0]]
-                    treasure = random.choice(avaliable_loot)
-                elif session.miniboss:  # rewards 50:50 rare:normal chest for killing something like the basilisk
-                    treasure = random.choice([[0, 0, 2, 2, 3, 0], [0, 1, 0, 2, 2, 0]])
-                elif monster_amount >= 700:  # super hard stuff
-                    if roll <= 7:
-                        treasure = random.choice([[0, 0, 0, 2, 2, 0], [0, 1, 2, 1, 0, 0]])
-                elif monster_amount >= 500:  # rewards 50:50 rare:epic chest for killing hard stuff.
-                    if roll <= 5:
-                        treasure = random.choice([[0, 0, 2, 0, 0, 0], [0, 1, 2, 1, 0, 0]])
-                elif monster_amount >= 300:  # rewards 50:50 rare:normal chest for killing hardish stuff
-                    if roll <= 2:
-                        treasure = random.choice([[0, 2, 0, 0, 0, 0], [1, 2, 1, 0, 0, 0]])
-                elif monster_amount >= 80:  # small chance of a normal chest on killing stuff that's not terribly weak
-                    if roll == 1:
-                        treasure = [3, 0, 0, 0, 0, 0]
-
-                if session.boss:  # always rewards at least an epic chest.
-                    # roll for legendary chest
-                    roll = random.randint(1, 100)
-                    if roll <= 30:
-                        treasure[4] += 1
-                    elif roll <= 50:
-                        treasure[3] += 1
-                    else:
-                        treasure[2] += 1
-                if len(critlist) != 0:
-                    treasure[1] += 1
-                if treasure == [0, 0, 0, 0, 0, 0]:
-                    treasure = False
         if session.miniboss and failed:
             session.participants = set(fight_list + talk_list + pray_list + magic_list + fumblelist)
             currency_name = await bank.get_currency_name(
@@ -1453,7 +1538,7 @@ class Adventure(
             result_msg += session.miniboss["defeat"]
             if len(repair_list) > 0:
                 temp_repair = []
-                for (user, loss) in repair_list:
+                for user, loss in repair_list:
                     if user not in temp_repair:
                         loss_list.append(
                             _("\n{user} used {loss} {currency_name}").format(
@@ -1497,7 +1582,7 @@ class Adventure(
             loss_list = []
             if len(repair_list) > 0:
                 temp_repair = []
-                for (user, loss) in repair_list:
+                for user, loss in repair_list:
                     if user not in temp_repair:
                         loss_list.append(
                             _("\n{user} used {loss} {currency_name}").format(
@@ -1575,7 +1660,7 @@ class Adventure(
                 loss_list = []
                 if len(repair_list) > 0:
                     temp_repair = []
-                    for (user, loss) in repair_list:
+                    for user, loss in repair_list:
                         if user not in temp_repair:
                             loss_list.append(
                                 _("\n{user} used {loss} {currency_name}").format(
@@ -1753,7 +1838,7 @@ class Adventure(
         loss_list = []
         if len(repair_list) > 0:
             temp_repair = []
-            for (user, loss) in repair_list:
+            for user, loss in repair_list:
                 if user not in temp_repair:
                     loss_list.append(
                         _("\n{user} used {loss} {currency_name}").format(
@@ -1784,7 +1869,7 @@ class Adventure(
             "fumbles": fumblelist,
         }
         parsed_users = []
-        for (action_name, action) in participants.items():
+        for action_name, action in participants.items():
             for user in action:
                 try:
                     c = await Character.from_json(ctx, self.config, user, self._daily_bonus)
@@ -1862,9 +1947,9 @@ class Adventure(
                     roll = random.randint(roll, max_roll)
             roll_perc = roll / max_roll
             att_value = c.total_att
-            rebirths = c.rebirths * (3 if c.heroclass["name"] == "Berserker" else 1)
+            rebirths = c.rebirths * (3 if c.hc is not HeroClasses.berserker else 1)
             if roll_perc < 0.10:
-                if c.heroclass["name"] == "Berserker" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.berserker and c.heroclass["ability"]:
                     bonus_roll = random.randint(5, 15)
                     bonus_multi = random.choice([0.2, 0.3, 0.4, 0.5])
                     bonus = max(bonus_roll, int((roll + att_value + rebirths) * bonus_multi))
@@ -1879,7 +1964,7 @@ class Adventure(
                     msg += _("{user} fumbled the attack.\n").format(user=bold(user.display_name))
                     fumblelist.append(user)
                     fumble_count += 1
-            elif roll_perc > 0.95 or c.heroclass["name"] == "Berserker":
+            elif roll_perc > 0.95 or c.hc is HeroClasses.berserker:
                 crit_str = ""
                 crit_bonus = 0
                 base_bonus = random.randint(5, 10) + rebirths
@@ -1888,7 +1973,7 @@ class Adventure(
                     critlist.append(user)
                     crit_bonus = (random.randint(5, 20)) + (rebirths * 2)
                     crit_str = f"{self.emojis.crit} {humanize_number(crit_bonus)}"
-                if c.heroclass["name"] == "Berserker" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.berserker and c.heroclass["ability"]:
                     base_bonus = (random.randint(1, 10) + 5) * (rebirths // 2)
                 base_str = f"{self.emojis.crit}️ {humanize_number(base_bonus)}"
                 attack += int((roll + base_bonus + crit_bonus + att_value) / pdef)
@@ -1936,12 +2021,12 @@ class Adventure(
                     roll = random.randint(roll, max_roll)
             roll_perc = roll / max_roll
             int_value = c.total_int
-            rebirths = c.rebirths * (3 if c.heroclass["name"] == "Wizard" else 1)
+            rebirths = c.rebirths * (3 if c.hc is HeroClasses.wizard else 1)
             if roll_perc < 0.10:
                 msg += _("{}{} almost set themselves on fire.\n").format(failed_emoji, bold(user.display_name))
                 fumblelist.append(user)
                 fumble_count += 1
-                if c.heroclass["name"] == "Wizard" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.wizard and c.heroclass["ability"]:
                     bonus_roll = random.randint(5, 15)
                     bonus_multi = random.choice([0.2, 0.3, 0.4, 0.5])
                     bonus = max(bonus_roll, int((roll + int_value + rebirths) * bonus_multi))
@@ -1952,7 +2037,7 @@ class Adventure(
                         f"{self.emojis.magic_crit}{humanize_number(bonus)} + "
                         f"{self.emojis.magic}{str(humanize_number(int_value))}\n"
                     )
-            elif roll_perc > 0.95 or (c.heroclass["name"] == "Wizard"):
+            elif roll_perc > 0.95 or (c.hc is HeroClasses.wizard):
                 crit_str = ""
                 crit_bonus = 0
                 base_bonus = random.randint(5, 10) + rebirths
@@ -1962,7 +2047,7 @@ class Adventure(
                     critlist.append(user)
                     crit_bonus = (random.randint(5, 20)) + (rebirths * 2)
                     crit_str = f"{self.emojis.crit} {humanize_number(crit_bonus)}"
-                if c.heroclass["name"] == "Wizard" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.wizard and c.heroclass["ability"]:
                     base_bonus = (random.randint(1, 10) + 5) * (rebirths // 2)
                     base_str = f"{self.emojis.magic_crit}️ {humanize_number(base_bonus)}"
                 magic += int((roll + base_bonus + crit_bonus + int_value) / mdef)
@@ -2015,8 +2100,8 @@ class Adventure(
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 continue
-            rebirths = c.rebirths * (2 if c.heroclass["name"] == "Cleric" else 1)
-            if c.heroclass["name"] == "Cleric":
+            rebirths = c.rebirths * (2 if c.hc is HeroClasses.cleric else 1)
+            if c.hc is HeroClasses.cleric:
                 crit_mod = max(max(c.dex, c.luck // 2) + (c.total_int // 20), 0)
                 mod = 0
                 max_roll = 100 if c.rebirths >= 30 else 50 if c.rebirths >= 15 else 20
@@ -2177,10 +2262,10 @@ class Adventure(
                 mod = 45
             roll = max(random.randint((1 + mod), max_roll), 1)
             dipl_value = c.total_cha
-            rebirths = c.rebirths * (3 if c.heroclass["name"] == "Bard" else 1)
+            rebirths = c.rebirths * (3 if c.hc is HeroClasses.bard else 1)
             roll_perc = roll / max_roll
             if roll_perc < 0.10:
-                if c.heroclass["name"] == "Bard" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.bard and c.heroclass["ability"]:
                     bonus = random.randint(5, 15)
                     diplomacy += int((roll - bonus + dipl_value + rebirths) / cdef)
                     report += f"{bold(user.display_name)} " f"🎲({roll}) +💥{bonus} +🗨{humanize_number(dipl_value)} | "
@@ -2188,7 +2273,7 @@ class Adventure(
                     msg += _("{}{} accidentally offended the enemy.\n").format(failed_emoji, bold(user.display_name))
                     fumblelist.append(user)
                     fumble_count += 1
-            elif roll_perc > 0.95 or c.heroclass["name"] == "Bard":
+            elif roll_perc > 0.95 or c.hc is HeroClasses.bard:
                 crit_str = ""
                 crit_bonus = 0
                 base_bonus = random.randint(5, 10) + rebirths
@@ -2198,7 +2283,7 @@ class Adventure(
                     crit_bonus = (random.randint(5, 20)) + (rebirths * 2)
                     crit_str = f"{self.emojis.crit} {crit_bonus}"
 
-                if c.heroclass["name"] == "Bard" and c.heroclass["ability"]:
+                if c.hc is HeroClasses.bard and c.heroclass["ability"]:
                     base_bonus = (random.randint(1, 10) + 5) * (rebirths // 2)
                 base_str = f"🎵 {humanize_number(base_bonus)}"
                 diplomacy += int((roll + base_bonus + crit_bonus + dipl_value) / cdef)
@@ -2258,14 +2343,16 @@ class Adventure(
                         current_equipment = c.get_current_equipment()
                         for item in current_equipment:
                             item_name = str(item)
-                            if item.rarity != "forged" and (req_item in item_name or "shiny" in item_name.lower()):
+                            if item.rarity is not Rarities.forged and (
+                                req_item in item_name or "shiny" in item_name.lower()
+                            ):
                                 failed = False
                                 break
         else:
             failed = False
         return failed
 
-    async def _add_rewards(self, ctx: commands.Context, user, exp, cp, special):
+    async def _add_rewards(self, ctx: commands.Context, user: discord.Member, exp: int, cp: int, special: Treasure):
         lock = self.get_lock(user)
         if not lock.locked():
             await lock.acquire()
@@ -2313,31 +2400,29 @@ class Adventure(
                 roll = random.randint(1, 100)
                 if lvl_end == c.maxlevel:
                     roll += random.randint(50, 100)
-                if special is False:
-                    special = [0, 0, 0, 0, 0, 0]
+                if not special:
+                    special = Treasure()
                     if c.rebirths > 1 and roll < 50:
-                        special[0] += 1
+                        special.normal += 1
                     if c.rebirths > 5 and roll < 30:
-                        special[1] += 1
+                        special.rare += 1
                     if c.rebirths > 10 > roll:
-                        special[2] += 1
+                        special.epic += 1
                     if c.rebirths > 15 and roll < 5:
-                        special[3] += 1
-                    if special == [0, 0, 0, 0, 0, 0]:
-                        special = False
+                        special.legendary += 1
+                    # if special == [0, 0, 0, 0, 0, 0]:
+                    # special = False
                 else:
                     if c.rebirths > 1 and roll < 50:
-                        special[0] += 1
+                        special.normal += 1
                     if c.rebirths > 5 and roll < 30:
-                        special[1] += 1
+                        special.rare += 1
                     if c.rebirths > 10 > roll:
-                        special[2] += 1
+                        special.epic += 1
                     if c.rebirths > 15 and roll < 5:
-                        special[3] += 1
-                    if special == [0, 0, 0, 0, 0, 0]:
-                        special = False
-            if special is not False:
-                c.treasure = [sum(x) for x in zip(c.treasure, special)]
+                        special.legendary += 1
+            if special:
+                c.treasure += special
             await self.config.user(user).set(await c.to_json(ctx, self.config))
             return rebirth_text
         finally:
@@ -2366,32 +2451,6 @@ class Adventure(
             log.debug("Timer countdown done.")
 
         return ctx.bot.loop.create_task(adv_countdown())
-
-    async def _cart_countdown(self, ctx: commands.Context, seconds, title, room=None) -> asyncio.Task:
-        room = room or ctx
-        await self._data_check(ctx)
-
-        async def cart_countdown():
-            secondint = int(seconds)
-            cart_end = await _get_epoch(secondint)
-            timer, done, sremain = await _remaining(cart_end)
-            message_cart = await room.send(f"⏳ [{title}] {timer}s")
-            deleted = False
-            while not done:
-                timer, done, sremain = await _remaining(cart_end)
-                self._trader_countdown[ctx.guild.id] = (timer, done, sremain)
-                if done:
-                    if not deleted:
-                        await message_cart.delete()
-                    break
-                if not deleted and int(sremain) % 5 == 0:
-                    try:
-                        await message_cart.edit(content=f"⏳ [{title}] {timer}s")
-                    except discord.NotFound:
-                        deleted = True
-                await asyncio.sleep(1)
-
-        return ctx.bot.loop.create_task(cart_countdown())
 
     async def _data_check(self, ctx: commands.Context):
         try:
@@ -2431,7 +2490,12 @@ class Adventure(
                 ctx = await self.bot.get_context(message)
                 ctx.command = self.makecart
                 await asyncio.sleep(5)
-                await self._trader(ctx)
+                timeout = await self.config.guild(ctx.guild).cart_timeout()
+                trader = Trader(timeout, ctx, self)
+                await trader.start(ctx)
+                await asyncio.sleep(timeout)
+                trader.stop()
+                await trader.on_timeout()
 
     async def _roll_chest(self, chest_type: str, c: Character):
         # set rarity to chest by default
@@ -2495,7 +2559,16 @@ class Adventure(
 
         return await self._genitem(c._ctx, rarity)
 
-    async def _reward(self, ctx: commands.Context, userlist, amount, modif, special):
+    async def _reward(self, ctx: commands.Context, userlist, amount: int, modif: float, special: Treasure) -> str:
+        """
+        text += await self._reward(
+                    ctx,
+                    [u for u in talk_list + pray_list if u not in fumblelist],
+                    amount,
+                    round((diplomacy / dipl) * 0.25),
+                    treasure,
+                )
+        """
         daymult = self._daily_bonus.get(str(datetime.today().isoweekday()), 0)
         xp = max(1, round(amount))
         cp = max(1, round(amount))
@@ -2529,7 +2602,7 @@ class Adventure(
             roll = random.randint(1, 5)
             if c.heroclass.get("pet", {}).get("bonuses", {}).get("always", False):
                 roll = 5
-            if roll == 5 and c.heroclass["name"] == "Ranger" and c.heroclass["pet"]:
+            if roll == 5 and c.hc is HeroClasses.ranger and c.heroclass["pet"]:
                 petxp = int(userxp * c.heroclass["pet"]["bonus"])
                 newxp += petxp
                 userxp += petxp
@@ -2560,7 +2633,7 @@ class Adventure(
                 )
                 self._rewards[user.id]["xp"] = userxp
                 self._rewards[user.id]["cp"] = usercp
-            if special is not False:
+            if special:
                 self._rewards[user.id]["special"] = special
             else:
                 self._rewards[user.id]["special"] = False
@@ -2572,13 +2645,13 @@ class Adventure(
         )
 
         word = "has" if len(userlist) == 1 else "have"
-        if special is not False and sum(special) == 1:
-            types = [" normal", " rare", "n epic", " legendary", "n ascended", " set"]
-            chest_type = types[special.index(1)]
+        if special:
+            chest_str = special.get_ansi()
+            chest_type = box(_("{chest_str} treasure chest!").format(chest_str=chest_str), lang="ansi")
             phrase += _(
                 "\n{b_reward} {word} been awarded {xp} xp and found "
                 "{cp} {currency_name} (split based on stats). "
-                "You also secured **a{chest_type} treasure chest**!"
+                "You also secured {chest_type}"
             ).format(
                 b_reward=to_reward,
                 word=word,
@@ -2586,17 +2659,6 @@ class Adventure(
                 cp=humanize_number(int(newcp)),
                 currency_name=currency_name,
                 chest_type=chest_type,
-            )
-        elif special is not False and sum(special) > 1:
-            phrase += _(
-                "\n{b_reward} {word} been awarded {xp} xp and found {cp} {currency_name} (split based on stats). "
-                "You also secured **several treasure chests**!"
-            ).format(
-                b_reward=to_reward,
-                word=word,
-                xp=humanize_number(int(newxp)),
-                cp=humanize_number(int(newcp)),
-                currency_name=currency_name,
             )
         else:
             phrase += _(
@@ -2618,7 +2680,7 @@ class Adventure(
         if self.gb_task:
             self.gb_task.cancel()
 
-        for (msg_id, task) in self.tasks.items():
+        for msg_id, task in self.tasks.items():
             task.cancel()
 
         for lock in self.locks.values():

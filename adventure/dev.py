@@ -3,7 +3,7 @@ import asyncio
 import logging
 import random
 from string import ascii_letters, digits
-from typing import Union
+from typing import Optional, Union
 
 import discord
 from redbot.core import commands
@@ -12,6 +12,7 @@ from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize
 
 from .abc import AdventureMixin
 from .bank import bank
+from .cart import Trader
 from .charsheet import Character
 from .constants import DEV_LIST, ORDER, RARITIES
 from .helpers import escape, is_dev, smart_embed
@@ -64,11 +65,15 @@ class DevCommands(AdventureMixin):
     @commands.command()
     @commands.bot_has_permissions(add_reactions=True)
     @commands.is_owner()
-    async def makecart(self, ctx: commands.Context):
+    async def makecart(self, ctx: commands.Context, stockcount: Optional[int] = None):
         """[Dev] Force a cart to appear."""
         if not await self.no_dev_prompt(ctx):
             return
-        await self._trader(ctx, True)
+        trader = Trader(60, ctx, self)
+        await trader.start(ctx, bypass=True, stockcount=stockcount)
+        await asyncio.sleep(60)
+        trader.stop()
+        await trader.on_timeout()
 
     @commands.command()
     @commands.is_owner()
@@ -153,7 +158,7 @@ class DevCommands(AdventureMixin):
                         _("{c}, congratulations on your rebirth.\nYou paid {bal}.").format(
                             c=escape(target.display_name), bal=humanize_number(withdraw)
                         ),
-                        lang="css",
+                        lang="ansi",
                     )
                 )
             await self._add_rewards(ctx, target, int((character_level) ** 3.5) + 1, 0, False)
