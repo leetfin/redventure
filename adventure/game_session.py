@@ -6,10 +6,11 @@ from math import ceil
 from typing import List, Mapping, MutableMapping, Optional, Set, Tuple
 
 import discord
-from redbot.core.commands import Context, commands
-from redbot.core.i18n import Translator
+from redbot.core.commands import Context
+from redbot.core.i18n import Translator, set_contextual_locales_from_guild
 from redbot.core.utils.chat_formatting import box, humanize_list, humanize_number
 
+from .abc import AdventureMixin
 from .charsheet import Character, has_funds
 from .constants import HeroClasses
 from .helpers import escape, smart_embed
@@ -64,38 +65,8 @@ class AttackButton(discord.ui.Button):
         for x in ["magic", "talk", "pray", "run"]:
             if user in getattr(self.view, x, []):
                 getattr(self.view, x).remove(user)
-        restricted = self.view.cog.config.restrict()
         if user not in self.view.fight:
-            if restricted:
-                all_users = []
-                for guild_id, guild_session in self.view.cog._sessions.items():
-                    guild_users_in_game = (
-                        guild_session.fight
-                        + guild_session.magic
-                        + guild_session.talk
-                        + guild_session.pray
-                        + guild_session.run
-                    )
-                    all_users = all_users + guild_users_in_game
-
-                if user in all_users:
-                    user_id = f"{user.id}-{user.guild.id}"
-                    # iterating through reactions here and removing them seems to be expensive
-                    # so they can just keep their react on the adventures they can't join
-                    if user_id not in self.view.cog._react_messaged:
-                        await interaction.response.send_message(
-                            _(
-                                "**{c}**, you are already in an existing adventure. "
-                                "Wait for it to finish before joining another one."
-                            ).format(c=escape(user.display_name)),
-                            ephemeral=True,
-                        )
-                        self.view.cog._react_messaged.append(user_id)
-                        return
-                else:
-                    self.view.fight.append(user)
-            else:
-                self.view.fight.append(user)
+            self.view.fight.append(user)
             await self.send_response(interaction)
             await self.view.update()
         else:
@@ -144,38 +115,8 @@ class MagicButton(discord.ui.Button):
         for x in ["fight", "talk", "pray", "run"]:
             if user in getattr(self.view, x, []):
                 getattr(self.view, x).remove(user)
-        restricted = self.view.cog.config.restrict()
         if user not in self.view.magic:
-            if restricted:
-                all_users = []
-                for guild_id, guild_session in self.view.cog._sessions.items():
-                    guild_users_in_game = (
-                        guild_session.fight
-                        + guild_session.magic
-                        + guild_session.talk
-                        + guild_session.pray
-                        + guild_session.run
-                    )
-                    all_users = all_users + guild_users_in_game
-
-                if user in all_users:
-                    user_id = f"{user.id}-{user.guild.id}"
-                    # iterating through reactions here and removing them seems to be expensive
-                    # so they can just keep their react on the adventures they can't join
-                    if user_id not in self.view.cog._react_messaged:
-                        await interaction.response.send_message(
-                            _(
-                                "**{c}**, you are already in an existing adventure. "
-                                "Wait for it to finish before joining another one."
-                            ).format(c=escape(user.display_name)),
-                            ephemeral=True,
-                        )
-                        self.view.cog._react_messaged.append(user_id)
-                        return
-                else:
-                    self.view.magic.append(user)
-            else:
-                self.view.magic.append(user)
+            self.view.magic.append(user)
             await self.send_response(interaction)
             await self.view.update()
         else:
@@ -224,38 +165,8 @@ class TalkButton(discord.ui.Button):
         for x in ["fight", "magic", "pray", "run"]:
             if user in getattr(self.view, x, []):
                 getattr(self.view, x).remove(user)
-        restricted = self.view.cog.config.restrict()
         if user not in self.view.talk:
-            if restricted:
-                all_users = []
-                for guild_id, guild_session in self.view.cog._sessions.items():
-                    guild_users_in_game = (
-                        guild_session.fight
-                        + guild_session.magic
-                        + guild_session.talk
-                        + guild_session.pray
-                        + guild_session.run
-                    )
-                    all_users = all_users + guild_users_in_game
-
-                if user in all_users:
-                    user_id = f"{user.id}-{user.guild.id}"
-                    # iterating through reactions here and removing them seems to be expensive
-                    # so they can just keep their react on the adventures they can't join
-                    if user_id not in self.view.cog._react_messaged:
-                        await interaction.response.send_message(
-                            _(
-                                "**{c}**, you are already in an existing adventure. "
-                                "Wait for it to finish before joining another one."
-                            ).format(c=escape(user.display_name)),
-                            ephemeral=True,
-                        )
-                        self.view.cog._react_messaged.append(user_id)
-                        return
-                else:
-                    self.view.talk.append(user)
-            else:
-                self.view.talk.append(user)
+            self.view.talk.append(user)
             await self.send_response(interaction)
             await self.view.update()
         else:
@@ -304,38 +215,8 @@ class PrayButton(discord.ui.Button):
         for x in ["fight", "magic", "talk", "run"]:
             if user in getattr(self.view, x, []):
                 getattr(self.view, x).remove(user)
-        restricted = self.view.cog.config.restrict()
         if user not in self.view.pray:
-            if restricted:
-                all_users = []
-                for guild_id, guild_session in self.view.cog._sessions.items():
-                    guild_users_in_game = (
-                        guild_session.fight
-                        + guild_session.magic
-                        + guild_session.talk
-                        + guild_session.pray
-                        + guild_session.run
-                    )
-                    all_users = all_users + guild_users_in_game
-
-                if user in all_users:
-                    user_id = f"{user.id}-{user.guild.id}"
-                    # iterating through reactions here and removing them seems to be expensive
-                    # so they can just keep their react on the adventures they can't join
-                    if user_id not in self.view.cog._react_messaged:
-                        await interaction.response.send_message(
-                            _(
-                                "**{c}**, you are already in an existing adventure. "
-                                "Wait for it to finish before joining another one."
-                            ).format(c=escape(user.display_name)),
-                            ephemeral=True,
-                        )
-                        self.view.cog._react_messaged.append(user_id)
-                        return
-                else:
-                    self.view.pray.append(user)
-            else:
-                self.view.pray.append(user)
+            self.view.pray.append(user)
             await self.send_response(interaction)
             await self.view.update()
         else:
@@ -378,7 +259,7 @@ class RunButton(discord.ui.Button):
         if await self.view.cog.config.guild(interaction.guild).god_name():
             god = await self.view.cog.config.guild(interaction.guild).god_name()
         choice = choice.replace("$god", god)
-        await interaction.response.send_message(choice, ephemeral=True)
+        await interaction.response.send_message(box(choice, lang="ansi"), ephemeral=True)
 
     async def callback(self, interaction: discord.Interaction):
         """Skip to previous track"""
@@ -386,38 +267,8 @@ class RunButton(discord.ui.Button):
         for x in ["fight", "magic", "talk", "pray"]:
             if user in getattr(self.view, x, []):
                 getattr(self.view, x).remove(user)
-        restricted = self.view.cog.config.restrict()
         if user not in self.view.run:
-            if restricted:
-                all_users = []
-                for guild_id, guild_session in self.view.cog._sessions.items():
-                    guild_users_in_game = (
-                        guild_session.fight
-                        + guild_session.magic
-                        + guild_session.talk
-                        + guild_session.pray
-                        + guild_session.run
-                    )
-                    all_users = all_users + guild_users_in_game
-
-                if user in all_users:
-                    user_id = f"{user.id}-{user.guild.id}"
-                    # iterating through reactions here and removing them seems to be expensive
-                    # so they can just keep their react on the adventures they can't join
-                    if user_id not in self.view.cog._react_messaged:
-                        await interaction.response.send_message(
-                            _(
-                                "**{c}**, you are already in an existing adventure. "
-                                "Wait for it to finish before joining another one."
-                            ).format(c=escape(user.display_name)),
-                            ephemeral=True,
-                        )
-                        self.view.cog._react_messaged.append(user_id)
-                        return
-                else:
-                    self.view.run.append(user)
-            else:
-                self.view.run.append(user)
+            self.view.run.append(user)
             await self.send_response(interaction)
             await self.view.update()
         else:
@@ -443,12 +294,12 @@ class SpecialActionButton(discord.ui.Button):
             "they used this skill or they have just changed their heroclass. "
             "Try again in {cooldown}."
         ).format(cooldown=f"<t:{cooldown_time}:R>")
-        await smart_embed(interaction, msg, success=False, ephemeral=True, cog=self.view.cog)
+        await smart_embed(interaction=interaction, message=msg, success=False, ephemeral=True, cog=self.view.cog)
 
     async def send_in_use(self, interaction: discord.Interaction):
         user = interaction.user
         msg = _("**{}**, ability already in use.").format(escape(user.display_name))
-        await smart_embed(interaction, msg, success=False, ephemeral=True, cog=self.view.cog)
+        await smart_embed(interaction=interaction, message=msg, success=False, ephemeral=True, cog=self.view.cog)
 
     async def send_cleric(self, interaction: discord.Interaction, c: Character):
         user = interaction.user
@@ -462,11 +313,11 @@ class SpecialActionButton(discord.ui.Button):
             if c.heroclass["cooldown"] <= time.time():
                 c.heroclass["ability"] = True
                 c.heroclass["cooldown"] = time.time() + cooldown_time
-                await self.view.config.user(user).set(await c.to_json(self.view.ctx, self.view.config))
+                await self.view.cog.config.user(user).set(await c.to_json(self.view.ctx, self.view.cog.config))
                 msg = _("{bless} **{c}** is starting an inspiring sermon. {bless}").format(
                     c=escape(user.display_name), bless=self.view.cog.emojis.skills.bless
                 )
-                await smart_embed(interaction, msg, cog=self.view.cog)
+                await smart_embed(interaction=interaction, message=msg, cog=self.view.cog)
             else:
                 await self.send_cooldown(interaction, c, cooldown_time)
 
@@ -502,7 +353,7 @@ class SpecialActionButton(discord.ui.Button):
                         c=escape(user.display_name),
                         skill=self.view.cog.emojis.skills.psychic,
                     )
-                    await smart_embed(interaction, msg, cog=self.view.cog)
+                    await smart_embed(interaction=interaction, message=msg, cog=self.view.cog)
             if good:
                 session = self.view
                 if roll <= 0.4:
@@ -742,9 +593,9 @@ class GameSession(discord.ui.View):
     """A class to represent and hold current game sessions per server."""
 
     ctx: Context
-    cog: commands.Cog
+    cog: AdventureMixin
     challenge: str
-    attribute: str
+    attribute: dict
     timer: int
     guild: discord.Guild
     boss: bool
@@ -771,7 +622,7 @@ class GameSession(discord.ui.View):
 
     def __init__(self, **kwargs):
         self.ctx: Context = kwargs.pop("ctx")
-        self.cog: commands.Cog = kwargs.pop("cog")
+        self.cog: AdventureMixin = kwargs.pop("cog")
         self.challenge: str = kwargs.pop("challenge")
         self.attribute: dict = kwargs.pop("attribute")
         self.guild: discord.Guild = kwargs.pop("guild")
@@ -833,6 +684,8 @@ class GameSession(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction):
         """Just extends the default reaction_check to use owner_ids"""
+        if interaction.guild is not None:
+            await set_contextual_locales_from_guild(interaction.client, interaction.guild)
         log.debug("Checking interaction")
         has_fund = await has_funds(interaction.user, 250)
         if not has_fund:
@@ -849,4 +702,26 @@ class GameSession(discord.ui.View):
                 ephemeral=True,
             )
             return False
+        if await self.cog.config.restrict():
+            user = interaction.user
+            all_users = []
+            in_adventure = False
+            for guild_session in self.cog._sessions.values():
+                if guild_session.in_adventure(user):
+                    in_adventure = True
+
+            if in_adventure:
+                user_id = f"{user.id}-{user.guild.id}"
+                # iterating through reactions here and removing them seems to be expensive
+                # so they can just keep their react on the adventures they can't join
+                if user_id not in self.cog._react_messaged:
+                    await interaction.response.send_message(
+                        _(
+                            "**{c}**, you are already in an existing adventure. "
+                            "Wait for it to finish before joining another one."
+                        ).format(c=escape(user.display_name)),
+                        ephemeral=True,
+                    )
+                    self.cog._react_messaged.append(user_id)
+                    return
         return True

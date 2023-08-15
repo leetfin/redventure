@@ -17,7 +17,7 @@ from redbot.core.utils.predicates import MessagePredicate
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
-from .constants import ORDER, HeroClasses, Rarities
+from .constants import HeroClasses, Rarities, Slot
 from .converters import HeroClassConverter, ItemConverter
 from .helpers import ConfirmView, escape, is_dev, smart_embed
 from .menus import BaseMenu, SimpleSource
@@ -104,7 +104,7 @@ class ClassAbilities(AdventureMixin):
                 )
                 broke = box(
                     _("You don't have enough {currency_name} to train to be a {clz}.").format(
-                        currency_name=currency_name, clz=clz.ansi(classes[clz.class_name]["name"])
+                        currency_name=currency_name, clz=clz.ansi
                     ),
                     lang="ansi",
                 )
@@ -436,7 +436,7 @@ class ClassAbilities(AdventureMixin):
             if "cooldown" not in c.heroclass:
                 c.heroclass["cooldown"] = cooldown_time + 1
             if c.heroclass["cooldown"] <= time.time():
-                await self._open_chest(ctx, c.heroclass["pet"]["name"], "pet", character=c)
+                await self._open_chest(ctx, c.heroclass["pet"]["name"], Rarities.pet, character=c)
                 c.heroclass["cooldown"] = time.time() + cooldown_time
                 await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
             else:
@@ -1129,19 +1129,16 @@ class ClassAbilities(AdventureMixin):
         newint = int((base_int * modifier) + base_int)
         newdex = int((base_dex * modifier) + base_dex)
         newluck = int((base_luck * modifier) + base_luck)
-        newslot = random.choice(ORDER)
-        if newslot == "two handed":
-            newslot = ["right", "left"]
-        else:
-            newslot = [newslot]
-        if len(newslot) == 2:  # two handed weapons add their bonuses twice
+        newslot = random.choice([i for i in Slot])
+
+        if newslot is Slot.two_handed:  # two handed weapons add their bonuses twice
             hand = "two handed"
         else:
-            if newslot[0] == "right" or newslot[0] == "left":
-                hand = newslot[0] + " handed"
+            if newslot is Slot.right or newslot is Slot.left:
+                hand = newslot.get_name() + " handed"
             else:
-                hand = newslot[0] + " slot"
-        if len(newslot) == 2:
+                hand = newslot.get_name() + " slot"
+        if newslot is Slot.two_handed:
             two_handed_msg = box(
                 _(
                     "{author}, your forging roll was {dice}({roll}).\n"
@@ -1213,7 +1210,7 @@ class ClassAbilities(AdventureMixin):
                     name = reply.content.lower()
         item = {
             name: {
-                "slot": newslot,
+                "slot": newslot.to_json(),
                 "att": newatt,
                 "cha": newdip,
                 "int": newint,

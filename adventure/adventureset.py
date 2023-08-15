@@ -15,7 +15,7 @@ from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character
-from .constants import ORDER
+from .constants import Slot
 from .converters import DayConverter, PercentageConverter, parse_timedelta
 from .helpers import has_separated_economy, smart_embed
 
@@ -285,7 +285,13 @@ class AdventureSetCommands(AdventureMixin):
     @adventureset.command()
     async def version(self, ctx: commands.Context):
         """Display the version of adventure being used."""
-        await ctx.send(box(_("Adventure version: {}").format(self.__version__)))
+        await ctx.send(
+            box(
+                _("Adventure version: {version}\nRepo: {repo}\nCommit: {commit}").format(
+                    version=self.__version__, repo=self._repo, commit=self._commit
+                )
+            )
+        )
 
     @adventureset.command()
     @commands.admin_or_permissions(administrator=True)
@@ -369,10 +375,10 @@ class AdventureSetCommands(AdventureMixin):
             except Exception as exc:
                 log.exception("Error with the new character sheet", exc_info=exc)
                 return
-            for slot in ORDER:
-                if slot == "two handed":
+            for slot in Slot:
+                if slot is Slot.two_handed:
                     continue
-                equipped_item = getattr(c, slot)
+                equipped_item = slot.get_item_slot(c)
                 if equipped_item and equipped_item.name.lower() == full_item_name.lower():
                     item = equipped_item
             if item:
@@ -477,9 +483,9 @@ class AdventureSetCommands(AdventureMixin):
             await self.config.guild(ctx.guild).cart_channels.set(channel_list)
 
     @commands.guild_only()
-    @commands.command()
+    @adventureset.command()
     @commands.cooldown(rate=1, per=4, type=commands.BucketType.guild)
-    async def adventuresettings(self, ctx: commands.Context):
+    async def showsettings(self, ctx: commands.Context):
         """Display current settings."""
         global_data = await self.config.all()
         guild_data = await self.config.guild(ctx.guild).all()

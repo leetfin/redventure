@@ -15,7 +15,7 @@ from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
 from .constants import ANSITextColours, Rarities
-from .converters import Stats
+from .converters import RarityConverter, Stats
 from .helpers import escape, has_separated_economy, smart_embed
 from .menus import BaseMenu, SimpleSource
 
@@ -339,14 +339,19 @@ class EconomyCommands(AdventureMixin):
         Item names containing spaces must be enclosed in double quotes. `[p]give item @locastan
         "fine dagger" 1 att 1 charisma rare twohanded` will give a two handed .fine_dagger with 1
         attack and 1 charisma to locastan. if a stat is not specified it will default to 0, order
-        does not matter. available stats are attack(att), charisma(diplo) or charisma(cha),
-        intelligence(int), dexterity(dex), and luck.
-
-        Item rarity is one of normal, rare, epic, legendary, set, forged, event.
-
-        Event items can have their level requirement and degrade number set via:
-        N degrade - (Set to -1 to never degrade on rebirths)
-        N level
+        does not matter.
+        available stats are:
+         - `attack` or `att`
+         - `charisma` or `diplo`
+         - `charisma` or `cha`
+         - `intelligence` or `int`
+         - `dexterity` or `dex`
+         - `luck`
+         - `rarity` (one of normal, rare, epic, legendary, set, forged, or event)
+         - `degrade` (Set to -1 to never degrade on rebirths)
+         - `level` (lvl)
+         - `slot` (one of `head`, `neck`, `chest`, `gloves`, `belt`, `legs`, `boots`, `left`, `right`
+         `ring`, `charm`, `twohanded`)
 
         `[p]give item @locastan "fine dagger" 1 att 1 charisma -1 degrade 100 level rare twohanded`
         """
@@ -378,23 +383,34 @@ class EconomyCommands(AdventureMixin):
     async def _give_loot(
         self,
         ctx: commands.Context,
-        loot_type: Literal["normal", "rare", "epic", "legendary", "ascended", "set"],
+        loot_type: RarityConverter,
         users: commands.Greedy[Union[discord.Member, discord.User]] = None,
         number: int = 1,
     ):
         """[Owner] Give treasure chest(s) to all specified users."""
 
         users = users or [ctx.author]
-        loot_types = ["normal", "rare", "epic", "legendary", "ascended", "set"]
+        loot_types = [
+            Rarities.normal,
+            Rarities.rare,
+            Rarities.epic,
+            Rarities.legendary,
+            Rarities.ascended,
+            Rarities.set,
+        ]
         if loot_type not in loot_types:
             return await smart_embed(
                 ctx,
-                (
-                    "Valid loot types: `normal`, `rare`, `epic`, `legendary`, `ascended` or `set`: "
-                    "ex. `{}give loot normal @locastan` "
-                ).format(ctx.prefix),
+                box(
+                    ("Valid loot types: {loot_types}: " "ex. `{prefix}give loot normal @locastan` ").format(
+                        prefix=ctx.prefix, loot_types=humanize_list([i.ansi for i in loot_types])
+                    ),
+                    lang="ansi",
+                ),
             )
-        if loot_type in ["legendary", "set", "ascended"] and not await ctx.bot.is_owner(ctx.author):
+        if loot_type in [Rarities.legendary, Rarities.set, Rarities.ascended] and not await ctx.bot.is_owner(
+            ctx.author
+        ):
             return await smart_embed(ctx, _("You are not worthy to award legendary loot."))
         for user in users:
             async with self.get_lock(user):
@@ -403,15 +419,15 @@ class EconomyCommands(AdventureMixin):
                 except Exception as exc:
                     log.exception("Error with the new character sheet", exc_info=exc)
                     continue
-                if loot_type == "rare":
+                if loot_type is Rarities.rare:
                     c.treasure.rare += number
-                elif loot_type == "epic":
+                elif loot_type is Rarities.epic:
                     c.treasure.epic += number
-                elif loot_type == "legendary":
+                elif loot_type is Rarities.legendary:
                     c.treasure.legendary += number
-                elif loot_type == "ascended":
+                elif loot_type is Rarities.ascended:
                     c.treasure.ascended += number
-                elif loot_type == "set":
+                elif loot_type is Rarities.set:
                     c.treasure.set += number
                 else:
                     c.treasure.normal += number

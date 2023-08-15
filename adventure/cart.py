@@ -15,7 +15,7 @@ from redbot.core.utils.chat_formatting import box, humanize_number
 
 from .bank import bank
 from .charsheet import Character, Item
-from .constants import ANSITextColours
+from .constants import ANSITextColours, Rarities, Slot
 from .helpers import _get_epoch, escape, is_dev, smart_embed
 
 _ = Translator("Adventure", __file__)
@@ -97,7 +97,7 @@ class TraderModal(discord.ui.Modal):
                         ).format(
                             author=escape(spender.display_name),
                             p_result=number,
-                            item_name=item.formatted_name,
+                            item_name=item.ansi,
                             item_price=humanize_number(price),
                             currency_name=currency_name,
                         ),
@@ -196,18 +196,18 @@ class Trader(discord.ui.View):
             currency_name = "credits"
         for (index, item) in enumerate(stock):
             item = stock[index]
-            if len(item["item"].slot) == 2:  # two handed weapons add their bonuses twice
-                hand = "two handed"
+            if item["item"].slot is Slot.two_handed:  # two handed weapons add their bonuses twice
+                hand = item["item"].slot.get_name()
                 att = item["item"].att * 2
                 cha = item["item"].cha * 2
                 intel = item["item"].int * 2
                 luck = item["item"].luck * 2
                 dex = item["item"].dex * 2
             else:
-                if item["item"].slot[0] == "right" or item["item"].slot[0] == "left":
-                    hand = item["item"].slot[0] + _(" handed")
+                if item["item"].slot is Slot.right or item["item"].slot is Slot.left:
+                    hand = item["item"].slot.get_name() + _(" handed")
                 else:
-                    hand = item["item"].slot[0] + _(" slot")
+                    hand = item["item"].slot.get_name() + _(" slot")
                 att = item["item"].att
                 cha = item["item"].cha
                 intel = item["item"].int
@@ -224,7 +224,7 @@ class Trader(discord.ui.View):
                     "[{hand}]) for {item_price} {currency_name}."
                 ).format(
                     i=str(index + 1),
-                    item_name=item["item"].formatted_name,
+                    item_name=item["item"].ansi,
                     lvl=item["item"].lvl,
                     str_att=str(att),
                     str_int=str(intel),
@@ -252,21 +252,21 @@ class Trader(discord.ui.View):
             #  rarity_roll = .9
             # 1% legendary
             if rarity_roll >= 0.95:
-                item = await self.ctx.cog._genitem(self.ctx, "legendary")
+                item = await self.ctx.cog._genitem(self.ctx, Rarities.legendary)
                 # min. 10 stat for legendary, want to be about 50k
                 price = random.randint(2500, 5000)
             # 20% epic
             elif rarity_roll >= 0.7:
-                item = await self.ctx.cog._genitem(self.ctx, "epic")
+                item = await self.ctx.cog._genitem(self.ctx, Rarities.epic)
                 # min. 5 stat for epic, want to be about 25k
                 price = random.randint(1000, 2000)
             # 35% rare
             elif rarity_roll >= 0.35:
-                item = await self.ctx.cog._genitem(self.ctx, "rare")
+                item = await self.ctx.cog._genitem(self.ctx, Rarities.rare)
                 # around 3 stat for rare, want to be about 3k
                 price = random.randint(500, 1000)
             else:
-                item = await self.ctx.cog._genitem(self.ctx, "normal")
+                item = await self.ctx.cog._genitem(self.ctx, Rarities.normal)
                 # 1 stat for normal, want to be <1k
                 price = random.randint(100, 500)
             # 35% normal

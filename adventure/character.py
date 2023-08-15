@@ -14,7 +14,7 @@ from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize
 from .abc import AdventureMixin
 from .bank import bank
 from .charsheet import Character, Item
-from .constants import ORDER, Rarities
+from .constants import Rarities, Slot
 from .converters import EquipableItemConverter, EquipmentConverter, SkillConverter
 from .helpers import ConfirmView, _title_case, escape, smart_embed
 from .menus import BaseMenu, SimpleSource
@@ -310,13 +310,11 @@ class CharacterCommands(AdventureMixin):
         msgs = []
         async for index, item in AsyncIter(items, steps=100).enumerate(start=1):
             item_name = str(item)
-            slots = len(item.slot)
-            slot_name = item.slot[0] if slots == 1 else "two handed"
+            slots = item.slot
+            slot_name = item.slot.get_name()
             if (item_name, slots, slot_name) in items_names:
                 continue
             items_names.add((item_name, slots, slot_name))
-            equip_level = c.equip_level(item)
-            can_equip = equip_level is not None and c.equip_level(item) > c.lvl
             rows.append(item.row(c.lvl))
         tables = await c.make_backpack_tables(rows, msg)
         for t in tables:
@@ -329,7 +327,7 @@ class CharacterCommands(AdventureMixin):
         ).start(ctx=ctx)
 
     async def _build_loadout_display(
-        self, ctx: commands.Context, userdata, loadout=True, rebirths: int = None, index: int = None
+        self, ctx: commands.Context, userdata: dict, loadout=True, rebirths: int = None, index: int = None
     ):
         table = BeautifulTable(default_alignment=ALIGN_LEFT, maxwidth=500)
         table.set_style(BeautifulTable.STYLE_RST)
@@ -352,11 +350,12 @@ class CharacterCommands(AdventureMixin):
         dex = 0
         luck = 0
 
-        def get_slot_index(slot):
-            slot = slot[0]
-            if slot not in ORDER:
-                return float("inf")
-            return ORDER.index(slot)
+        def get_slot_index(slot: Union[Slot, tuple, list]):
+            if isinstance(slot, str):
+                slot = Slot.from_list([slot])
+            elif isinstance(slot, (tuple, list)):
+                slot = Slot.from_list(slot)
+            return slot.order()
 
         data_sorted = sorted(userdata["items"].items(), key=get_slot_index)
         items_names = set()
@@ -370,8 +369,8 @@ class CharacterCommands(AdventureMixin):
                 continue
             item = Item.from_json(ctx, data)
             item_name = str(item)
-            slots = len(item.slot)
-            slot_name = item.slot[0] if slots == 1 else "two handed"
+            slots = item.slot
+            slot_name = item.slot.get_name()
             if (item_name, slots, slot_name) in items_names:
                 continue
             items_names.add((item_name, slots, slot_name))

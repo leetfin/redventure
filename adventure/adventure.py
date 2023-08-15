@@ -8,7 +8,7 @@ import time
 from abc import ABC
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Literal, MutableMapping, Optional, Union
+from typing import Dict, Literal, MutableMapping, Optional, Tuple, Union
 
 import discord
 from discord.ext.commands import CheckFailure
@@ -20,7 +20,6 @@ from redbot.core.errors import BalanceTooHigh
 from redbot.core.i18n import Translator, cog_i18n
 from redbot.core.utils import AsyncIter
 from redbot.core.utils.chat_formatting import bold, box, humanize_list, humanize_number, pagify
-from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
 
 from .adventureresult import AdventureResults
@@ -29,7 +28,7 @@ from .backpack import BackPackCommands
 from .bank import bank
 from .cart import Trader
 from .character import CharacterCommands
-from .charsheet import Character, calculate_sp, has_funds
+from .charsheet import Character, Item, calculate_sp, has_funds
 from .class_abilities import ClassAbilities
 from .constants import DEV_LIST, ANSITextColours, HeroClasses, Rarities, Treasure
 from .converters import ArgParserFailure, ChallengeConverter
@@ -44,6 +43,7 @@ from .loot import LootCommands
 from .negaverse import Negaverse
 from .rebirth import RebirthCommands
 from .themeset import ThemesetCommands
+from .types import Monster
 
 _ = Translator("Adventure", __file__)
 
@@ -93,7 +93,7 @@ class Adventure(
             user_id
         ).clear()  # This will only ever touch the separate currency, leaving bot economy to be handled by core.
 
-    __version__ = "4.0.0"
+    __version__ = "4.0.4"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -140,20 +140,6 @@ class Adventure(
             "pray": self.emojis.pray,
             "run": self.emojis.run,
         }
-        self._order = [
-            "head",
-            "neck",
-            "chest",
-            "gloves",
-            "belt",
-            "legs",
-            "boots",
-            "left",
-            "right",
-            "two handed",
-            "ring",
-            "charm",
-        ]
         self._treasure_controls = {
             self.emojis.yes: "equip",
             self.emojis.no: "backpack",
@@ -202,10 +188,33 @@ class Adventure(
         self.app_command.remove_command("adventure")
         self._adventure.app_command.name = "start"
         self.app_command.add_command(self._adventure.app_command)
+        self._commit = ""
+        self._repo = ""
+
+    def format_help_for_context(self, ctx: commands.Context) -> str:
+        """
+        Thanks Sinbad!
+
+        How many people are going to copy this one?
+        """
+        pre_processed = super().format_help_for_context(ctx)
+        ret = f"{pre_processed}\n\nCog Version: {self.__version__}\n"
+        # we'll only have a repo if the cog was installed through Downloader at some point
+        if self._repo:
+            ret += f"Repo: {self._repo}\n"
+            ret += f"Commit: [{self._commit[:9]}]({self._repo}/tree/{self._commit})"
+        else:
+            ret += "Repo: Unknown Repo\n"
+            if self._commit:
+                ret += f"Commit: {self._commit}"
+            else:
+                ret += "Commit: Unknown commit"
+        return ret
 
     async def cog_before_invoke(self, ctx: commands.Context):
         await self._ready_event.wait()
         if ctx.author.id in self.locks and self.locks[ctx.author.id].locked():
+            await ctx.send(_("You're already interacting with something that needs your attention!"), ephemeral=True)
             raise CheckFailure(f"There's an active lock for this user ({ctx.author.id})")
         return True
 
@@ -216,6 +225,14 @@ class Adventure(
     async def initialize(self):
         """This will load all the bundled data into respective variables."""
         await self.bot.wait_until_red_ready()
+        downloader = self.bot.get_cog("Downloader")
+        if downloader is not None:
+            cogs = await downloader.installed_cogs()
+            for cog in cogs:
+                if cog.name == "adventure":
+                    if cog.repo is not None:
+                        self._repo = cog.repo.clean_url
+                    self._commit = cog.commit
         try:
             global _config
             _config = self.config
@@ -460,25 +477,19 @@ class Adventure(
                 del item_dict["set"]
         return (new_name, item_dict)
 
-    def in_adventure(self, ctx=None, user=None):
+    def in_adventure(self, ctx: Optional[commands.Context] = None, user: Optional[discord.Member] = None) -> bool:
+        """
+        Returns `True` if the user is in an adventure or otherwise engaged
+        with something requiring their attention.
+        """
         author = user or ctx.author
         sessions = self._sessions
         if not sessions:
-            return False
-        participants_ids = set(
-            [
-                p.id
-                for _loop, session in self._sessions.items()
-                for p in [
-                    *session.fight,
-                    *session.magic,
-                    *session.pray,
-                    *session.talk,
-                    *session.run,
-                ]
-            ]
-        )
-        return bool(author.id in participants_ids)
+            return False or self.get_lock(author).locked()
+        for session in self._sessions.values():
+            if session.in_adventure(author):
+                return True
+        return False or self.get_lock(author).locked()
 
     async def allow_in_dm(self, ctx):
         """Checks if the bank is global and allows the command in dm."""
@@ -678,7 +689,7 @@ class Adventure(
         possible_monsters = []
         stat_range = self._adv_results.get_stat_range(ctx)
         async for (e, (m, stats)) in AsyncIter(monsters.items(), steps=100).enumerate(start=1):
-            if stat_range["max_stat"] > 0:
+            if stat_range["max_stat"] > 0.0:
                 main_stat = stats["hp"] if (stat_range["stat_type"] == "attack") else stats["dipl"]
                 appropriate_range = (stat_range["min_stat"] * 0.5) <= main_stat <= (stat_range["max_stat"] * 1.2)
             else:
@@ -702,7 +713,7 @@ class Adventure(
             choice = random.choice(possible_monsters)
         return choice
 
-    def _dynamic_monster_stats(self, ctx: commands.Context, choice: MutableMapping):
+    def _dynamic_monster_stats(self, ctx: commands.Context, choice: Monster) -> Monster:
         stat_range = self._adv_results.get_stat_range(ctx)
         win_percentage = stat_range.get("win_percent", 0.5)
         choice["cdef"] = choice.get("cdef", 1.0)
@@ -796,14 +807,23 @@ class Adventure(
         choice["cdef"] = new_cdef
         return choice
 
-    async def update_monster_roster(self, ctx: commands.Context):
-        try:
-            c = await Character.from_json(ctx, self.config, ctx.author, self._daily_bonus)
-            failed = False
-        except Exception as exc:
-            log.exception("Error with the new character sheet", exc_info=exc)
-            failed = True
+    async def update_monster_roster(self, c: Optional[Character] = None) -> Tuple[Dict[str, Monster], float, bool]:
+        """
+        Gets the current list of available monsters, their stats, and whether
+        or not to spawn a transcended.
 
+        Parameters
+        ----------
+            c: Optional[Character]
+                The character used to determine actual stats of the monster.
+                If this is `None` then just basic stats will apply.
+
+        Returns
+        -------
+            Tuple[Dict[str, Monster], float, bool]
+                The Available monsters dictionary, the stats they should have scaled,
+                and whether or not it is transcended.
+        """
         transcended_chance = random.randint(0, 10)
         theme = await self.config.theme()
         extra_monsters = await self.config.themes.all()
@@ -811,17 +831,19 @@ class Adventure(
         monster_stats = 1
         monsters = {**self.MONSTERS, **self.AS_MONSTERS, **extra_monsters}
         transcended = False
-        if not failed:
+        # set our default return values first
+        monster_stats = 1.0
+        if transcended_chance == 5:
+            monster_stats = 2.0
+
+        # if this is a normal adventure start e.g. not a bot owner
+        # picking the adventure, then we can randomly adjust the stats
+        if c is not None:
             if transcended_chance == 5:
                 monster_stats = 2 + max((c.rebirths // 10) - 1, 0)
                 transcended = True
             elif c.rebirths >= 10:
                 monster_stats = 1 + max((c.rebirths // 10) - 1, 0) / 2
-        else:
-            if transcended_chance == 5:
-                monster_stats = 2
-            else:
-                monster_stats = 1
         return monsters, monster_stats, transcended
 
     async def _simple(self, ctx: commands.Context, adventure_msg, challenge: str = None, attribute: str = None):
@@ -837,7 +859,7 @@ class Adventure(
             else:
                 easy_mode = True
 
-        monster_roster, monster_stats, transcended = await self.update_monster_roster(ctx)
+        monster_roster, monster_stats, transcended = await self.update_monster_roster(c)
         if not challenge or challenge not in monster_roster:
             challenge = await self.get_challenge(ctx, monster_roster)
 
@@ -1390,6 +1412,7 @@ class Adventure(
                 treasure,
             )
             parsed_users = []
+
             for action_name, action in participants.items():
                 for user in action:
                     try:
@@ -1398,6 +1421,7 @@ class Adventure(
                         log.exception("Error with the new character sheet", exc_info=exc)
                         continue
                     current_val = c.adventures.get(action_name, 0)
+
                     c.adventures.update({action_name: current_val + 1})
                     if user not in parsed_users:
                         special_action = "loses" if lost or user in participants["run"] else "wins"
@@ -2352,17 +2376,15 @@ class Adventure(
             failed = False
         return failed
 
-    async def _add_rewards(self, ctx: commands.Context, user: discord.Member, exp: int, cp: int, special: Treasure):
-        lock = self.get_lock(user)
-        if not lock.locked():
-            await lock.acquire()
-        try:
-            c = await Character.from_json(ctx, self.config, user, self._daily_bonus)
-        except Exception as exc:
-            log.exception("Error with the new character sheet", exc_info=exc)
-            lock.release()
-            return
-        else:
+    async def _add_rewards(
+        self, ctx: commands.Context, user: Union[discord.Member, discord.User], exp: int, cp: int, special: Treasure
+    ) -> Optional[str]:
+        async with self.get_lock(user):
+            try:
+                c = await Character.from_json(ctx, self.config, user, self._daily_bonus)
+            except Exception as exc:
+                log.exception("Error with the new character sheet", exc_info=exc)
+                return
             rebirth_text = ""
             c.exp += exp
             member = ctx.guild.get_member(user.id)
@@ -2425,10 +2447,6 @@ class Adventure(
                 c.treasure += special
             await self.config.user(user).set(await c.to_json(ctx, self.config))
             return rebirth_text
-        finally:
-            lock = self.get_lock(user)
-            with contextlib.suppress(Exception):
-                lock.release()
 
     async def _adv_countdown(self, ctx: commands.Context, seconds, title) -> asyncio.Task:
         await self._data_check(ctx)
@@ -2497,11 +2515,11 @@ class Adventure(
                 trader.stop()
                 await trader.on_timeout()
 
-    async def _roll_chest(self, chest_type: str, c: Character):
+    async def _roll_chest(self, chest_type: Rarities, c: Character) -> Item:
         # set rarity to chest by default
         rarity = chest_type
-        if chest_type == "pet":
-            rarity = "normal"
+        if chest_type is Rarities.pet:
+            rarity = Rarities.normal
         INITIAL_MAX_ROLL = 400
         # max luck for best chest odds
         MAX_CHEST_LUCK = 200
@@ -2509,53 +2527,53 @@ class Adventure(
         max_roll = INITIAL_MAX_ROLL - round(c.luck) - (c.rebirths // 2)
         top_range = max(max_roll, INITIAL_MAX_ROLL - MAX_CHEST_LUCK)
         roll = max(random.randint(1, top_range), 1)
-        if chest_type == "normal":
+        if chest_type is Rarities.normal:
             if roll <= INITIAL_MAX_ROLL * 0.05:  # 5% to roll rare
-                rarity = "rare"
+                rarity = Rarities.rare
             else:
                 pass  # 95% to roll common
-        elif chest_type == "rare":
+        elif chest_type is Rarities.rare:
             if roll <= INITIAL_MAX_ROLL * 0.05:  # 5% to roll epic
-                rarity = "epic"
+                rarity = Rarities.epic
             elif roll <= INITIAL_MAX_ROLL * 0.95:  # 90% to roll rare
                 pass
             else:
-                rarity = "normal"  # 5% to roll normal
-        elif chest_type == "epic":
+                rarity = Rarities.normal  # 5% to roll normal
+        elif chest_type is Rarities.epic:
             if roll <= INITIAL_MAX_ROLL * 0.05:  # 5% to roll legendary
-                rarity = "legendary"
+                rarity = Rarities.legendary
             elif roll <= INITIAL_MAX_ROLL * 0.90:  # 85% to roll epic
                 pass
             else:  # 10% to roll rare
-                rarity = "rare"
-        elif chest_type == "legendary":
+                rarity = Rarities.rare
+        elif chest_type is Rarities.legendary:
             if roll <= INITIAL_MAX_ROLL * 0.75:  # 75% to roll legendary
                 pass
             elif roll <= INITIAL_MAX_ROLL * 0.95:  # 20% to roll epic
-                rarity = "epic"
+                rarity = Rarities.epic
             else:
-                rarity = "rare"  # 5% to roll rare
-        elif chest_type == "ascended":
+                rarity = Rarities.rare  # 5% to roll rare
+        elif chest_type is Rarities.ascended:
             if roll <= INITIAL_MAX_ROLL * 0.55:  # 55% to roll set
-                rarity = "ascended"
+                rarity = Rarities.ascended
             else:
-                rarity = "legendary"  # 45% to roll legendary
-        elif chest_type == "pet":
+                rarity = Rarities.legendary  # 45% to roll legendary
+        elif chest_type is Rarities.pet:
             if roll <= INITIAL_MAX_ROLL * 0.05:  # 5% to roll legendary
-                rarity = "legendary"
+                rarity = Rarities.legendary
             elif roll <= INITIAL_MAX_ROLL * 0.15:  # 10% to roll epic
-                rarity = "epic"
+                rarity = Rarities.epic
             elif roll <= INITIAL_MAX_ROLL * 0.57:  # 42% to roll rare
-                rarity = "rare"
+                rarity = Rarities.rare
             else:
-                rarity = "normal"  # 47% to roll common
-        elif chest_type == "set":
+                rarity = Rarities.normal  # 47% to roll common
+        elif chest_type is Rarities.set:
             if roll <= INITIAL_MAX_ROLL * 0.55:  # 55% to roll set
-                rarity = "set"
+                rarity = Rarities.set
             elif roll <= INITIAL_MAX_ROLL * 0.87:
-                rarity = "ascended"  # 45% to roll legendary
+                rarity = Rarities.ascended  # 45% to roll legendary
             else:
-                rarity = "legendary"  # 45% to roll legendary
+                rarity = Rarities.legendary  # 45% to roll legendary
 
         return await self._genitem(c._ctx, rarity)
 

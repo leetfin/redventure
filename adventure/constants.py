@@ -3,10 +3,13 @@ from __future__ import annotations
 import logging
 import time
 from enum import Enum
-from typing import Dict, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import humanize_list
+
+if TYPE_CHECKING:
+    from .charsheet import Character, Item
 
 _ = Translator("Adventure", __file__)
 
@@ -14,6 +17,97 @@ log = logging.getLogger("red.cogs.adventure")
 
 ANSI_ESCAPE = "\u001b"
 ANSI_CLOSE = "\u001b[0m"
+
+
+class Slot(Enum):
+    head = "head"
+    neck = "neck"
+    chest = "chest"
+    gloves = "gloves"
+    belt = "belt"
+    legs = "legs"
+    boots = "boots"
+    left = "left"
+    right = "right"
+    two_handed = "two handed"
+    ring = "ring"
+    charm = "charm"
+
+    @classmethod
+    def from_list(cls, data: List[str]) -> Slot:
+        if len(data) > 1:
+            return cls.two_handed
+        return cls(data[0])
+
+    def __str__(self):
+        return self.names()[self]
+
+    @property
+    def char_slot(self):
+        if self is Slot.two_handed:
+            return "right"
+        return self.name
+
+    @classmethod
+    def get_from_name(cls, name: str) -> Slot:
+        for i in cls:
+            if " " in name:
+                name = name.replace(" ", "_")
+            if i.name.lower() == name.lower():
+                return i
+            elif name.lower() == i.get_name().lower():
+                return i
+        raise KeyError(
+            _("{slot} is not a valid slot, select one of {slots}").format(
+                slot=name, slots=humanize_list([i.get_name() for i in Slot])
+            )
+        )
+
+    def get_item_slot(self, character: Character) -> Optional[Item]:
+        if self is Slot.two_handed:
+            return None
+        return getattr(character, self.name, None)
+
+    def order(self) -> int:
+        return {
+            Slot.head: 0,
+            Slot.neck: 1,
+            Slot.chest: 2,
+            Slot.gloves: 3,
+            Slot.belt: 4,
+            Slot.legs: 5,
+            Slot.boots: 6,
+            Slot.left: 7,
+            Slot.right: 8,
+            Slot.two_handed: 9,
+            Slot.ring: 10,
+            Slot.charm: 11,
+        }.get(self, -1)
+
+    @staticmethod
+    def names() -> Dict[Slot, str]:
+        return {
+            Slot.head: _("Head"),
+            Slot.neck: _("Neck"),
+            Slot.chest: _("Chest"),
+            Slot.gloves: _("Gloves"),
+            Slot.belt: _("Belt"),
+            Slot.legs: _("Legs"),
+            Slot.boots: _("Boots"),
+            Slot.left: _("Left"),
+            Slot.right: _("Right"),
+            Slot.two_handed: _("Two Handed"),
+            Slot.ring: _("Ring"),
+            Slot.charm: _("Charm"),
+        }
+
+    def get_name(self) -> Optional[str]:
+        return self.names().get(self)
+
+    def to_json(self) -> List[str]:
+        if self is Slot.two_handed:
+            return ["left", "right"]
+        return [self.name]
 
 
 class Rarities(Enum):
@@ -27,9 +121,10 @@ class Rarities(Enum):
     # Special rarities so we leave room for more in between
     forged = 16
     event = 32
+    pet = 64
 
     def __str__(self):
-        return self.name.title()
+        return self.names()[self]
 
     @classmethod
     def get_from_name(cls, name: str) -> Rarities:
@@ -38,23 +133,44 @@ class Rarities(Enum):
                 return i
             elif name == i.get_name():
                 return i
-        return Rarities.normal
+        raise KeyError(
+            _("{rarity} is not a valid rarity, select one of {rarities}").format(
+                rarity=name, rarities=humanize_list([i.get_name() for i in Rarities])
+            )
+        )
 
     @staticmethod
     def names():
         return {
-            "normal": _("Normal"),
-            "rare": _("Rare"),
-            "epic": _("Epic"),
-            "legendary": _("Legendary"),
-            "ascended": _("Ascended"),
-            "set": _("Set"),
-            "forged": _("Forged"),
-            "event": _("Event"),
+            Rarities.normal: _("Normal"),
+            Rarities.rare: _("Rare"),
+            Rarities.epic: _("Epic"),
+            Rarities.legendary: _("Legendary"),
+            Rarities.ascended: _("Ascended"),
+            Rarities.set: _("Set"),
+            Rarities.forged: _("Forged"),
+            Rarities.event: _("Event"),
+            Rarities.pet: _("Pet"),
         }
 
+    def prefix_chance(self) -> Optional[float]:
+        return {
+            Rarities.rare: 0.5,
+            Rarities.epic: 0.75,
+            Rarities.legendary: 0.9,
+            Rarities.ascended: 1.0,
+            Rarities.set: 0.0,
+        }.get(self)
+
+    def suffix_chance(self) -> Optional[float]:
+        return {
+            Rarities.epic: 0.5,
+            Rarities.legendary: 0.75,
+            Rarities.ascended: 0.5,
+        }.get(self)
+
     def get_name(self) -> str:
-        return self.names().get(self.name, _("Normal"))
+        return self.names().get(self, _("Normal"))
 
     @property
     def ansi(self) -> str:
