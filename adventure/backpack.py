@@ -26,7 +26,7 @@ from .converters import (
     SlotConverter,
 )
 from .helpers import ConfirmView, _sell, escape, is_dev, smart_embed
-from .menus import BackpackMenu, BaseMenu, SimpleSource
+from .menus import BackpackMenu, BackpackSource, BaseMenu, SimpleSource
 
 _ = Translator("Adventure", __file__)
 
@@ -229,7 +229,8 @@ class BackPackCommands(AdventureMixin):
                     _("You have no items in your backpack."),
                 )
             await BackpackMenu(
-                source=SimpleSource(msgs),
+                source=BackpackSource(msgs),
+                cog=self,
                 help_command=self._backpack,
                 delete_message_after=True,
                 clear_reactions_after=True,
@@ -266,27 +267,24 @@ class BackPackCommands(AdventureMixin):
             equip = c.backpack.get(equip_item.name)
             if equip:
                 slot = equip.slot
-                if not getattr(c, equip.slot.char_slot):
-                    equip_msg = box(
-                        _("{author} equipped {item} ({slot} slot).").format(
-                            author=escape(ctx.author.display_name), item=str(equip), slot=slot.get_name()
-                        ),
-                        lang="ansi",
+                put = getattr(c, equip.slot.char_slot)
+                equip_msg = _("{author} equipped {item} ({slot} slot)").format(
+                    author=escape(ctx.author.display_name),
+                    item=equip.as_ansi(),
+                    slot=slot.get_name(),
+                )
+                if put:
+                    equip_msg += _("and put {put} into their backpack").format(
+                        author=escape(ctx.author.display_name),
+                        item=equip.as_ansi(),
+                        slot=slot,
+                        put=getattr(c, equip.slot.char_slot).as_ansi(),
                     )
-                else:
-                    equip_msg = box(
-                        _("{author} equipped {item} ({slot} slot) and put {put} into their backpack.").format(
-                            author=escape(ctx.author.display_name),
-                            item=str(equip),
-                            slot=slot,
-                            put=getattr(c, equip.slot.name),
-                        ),
-                        lang="ansi",
-                    )
+                equip_msg += f".\n{equip.table(c)}"
 
                 c = await c.equip_item(equip, True, is_dev(ctx.author))  # FIXME:
                 await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
-        await ctx.send(equip_msg)
+        await ctx.send(box(equip_msg, lang="ansi"))
 
     @_backpack.command(name="eset", cooldown_after_parsing=True)
     @commands.cooldown(rate=1, per=600, type=commands.BucketType.user)
@@ -593,6 +591,12 @@ class BackPackCommands(AdventureMixin):
                 _("You take the item and pass it from one hand to the other. Congratulations, you traded yourself."),
                 ephemeral=True,
             )
+        if buyer.bot:
+            return await smart_embed(
+                ctx,
+                _("Do you really expect the bot to have any use for this item?"),
+                ephemeral=True,
+            )
         if self.in_adventure(ctx):
             return await smart_embed(
                 ctx,
@@ -666,35 +670,18 @@ class BackPackCommands(AdventureMixin):
             )
         else:
             item = lookup[0]
-            hand = item.slot.get_name()
             currency_name = await bank.get_currency_name(
                 ctx.guild,
             )
             if str(currency_name).startswith("<"):
                 currency_name = "credits"
+            title = _(
+                "{author} wants to sell {item}.\nDo you want to buy this item for {asking} {currency_name}?\n\n"
+            ).format(
+                author=escape(ctx.author.display_name), item=item.as_ansi(), asking=asking, currency_name=currency_name
+            )
             trade_talk = box(
-                _(
-                    "{author} wants to sell {item}. "
-                    "(ATT: {att_item} | "
-                    "CHA: {cha_item} | "
-                    "INT: {int_item} | "
-                    "DEX: {dex_item} | "
-                    "LUCK: {luck_item}) "
-                    "[{hand}])\n{buyer}, "
-                    "do you want to buy this item for {asking} {currency_name}?"
-                ).format(
-                    author=escape(ctx.author.display_name),
-                    item=item,
-                    att_item=str(item.att),
-                    cha_item=str(item.cha),
-                    int_item=str(item.int),
-                    dex_item=str(item.dex),
-                    luck_item=str(item.luck),
-                    hand=hand,
-                    buyer=escape(buyer.display_name),
-                    asking=str(asking),
-                    currency_name=currency_name,
-                ),
+                title + str(item.table(c)),
                 lang="ansi",
             )
             view = ConfirmView(60, buyer)
@@ -792,7 +779,8 @@ class BackPackCommands(AdventureMixin):
             backpack_pages = await c.get_backpack(rarity=rarity, slot=slot, show_delta=show_diff, equippable=True)
             if backpack_pages:
                 await BackpackMenu(
-                    source=SimpleSource(backpack_pages),
+                    source=BackpackSource(backpack_pages),
+                    cog=self,
                     help_command=self.commands_equipable_backpack,
                     delete_message_after=True,
                     clear_reactions_after=True,
@@ -836,7 +824,8 @@ class BackPackCommands(AdventureMixin):
         backpack_pages = await c.get_argparse_backpack(query)
         if backpack_pages:
             await BackpackMenu(
-                source=SimpleSource(backpack_pages),
+                source=BackpackSource(backpack_pages),
+                cog=self,
                 help_command=self.commands_cbackpack,
                 delete_message_after=True,
                 clear_reactions_after=True,
@@ -890,7 +879,7 @@ class BackPackCommands(AdventureMixin):
         disassembled = set()
 
         async for slot_name, slot_group in AsyncIter(slots, steps=100):
-            async for item_name, item in AsyncIter(slot_group, steps=100):
+            async for item in AsyncIter(slot_group, steps=100):
                 try:
                     item = character.backpack[item.name]
                 except KeyError:
@@ -976,7 +965,7 @@ class BackPackCommands(AdventureMixin):
             msg = ""
             async with ctx.typing():
                 async for slot_name, slot_group in AsyncIter(slots, steps=100):
-                    async for item_name, item in AsyncIter(slot_group, steps=100):
+                    async for item in AsyncIter(slot_group, steps=100):
                         old_owned = item.owned
                         item_price = 0
                         async for _loop_counter in AsyncIter(range(0, old_owned), steps=100):

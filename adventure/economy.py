@@ -5,7 +5,7 @@ import time
 from typing import Literal, Union
 
 import discord
-from beautifultable import ALIGN_LEFT, BeautifulTable
+from beautifultable import ALIGN_CENTER, BeautifulTable
 from redbot.core import commands
 from redbot.core.errors import BalanceTooHigh
 from redbot.core.i18n import Translator
@@ -243,30 +243,39 @@ class EconomyCommands(AdventureMixin):
             return
 
         sets = await character.get_set_count()
-        table = BeautifulTable(default_alignment=ALIGN_LEFT, maxwidth=500)
+        table = BeautifulTable(default_alignment=ALIGN_CENTER, maxwidth=500)
         table.set_style(BeautifulTable.STYLE_RST)
         table.columns.header = [
             "Name",
-            "Unique Pieces",
-            "Unique Owned",
+            "Unique\nPieces",
+            # "Unique Owned",
         ]
+        table.columns.alignment["Name"] = BeautifulTable.ALIGN_LEFT
         msgs = []
         for k, v in sets.items():
             if len(str(table)) > 1500:
                 table.rows.sort("Name", reverse=False)
                 msgs.append(box(str(table) + f"\nPage {len(msgs) + 1}", lang="ansi"))
-                table = BeautifulTable(default_alignment=ALIGN_LEFT, maxwidth=500)
+                table = BeautifulTable(default_alignment=ALIGN_CENTER, maxwidth=500)
                 table.set_style(BeautifulTable.STYLE_RST)
                 table.columns.header = [
                     "Name",
-                    "Unique Pieces",
-                    "Unique Owned",
+                    "Unique\nPieces",
+                    # "Unique Owned",
                 ]
+
+            total = v[0]
+            owned = v[1]
+            owned_str = str(owned)
+            if total == owned:
+                owned_str = ANSITextColours.green.as_str(f"{owned}/{total}")
+            else:
+                owned_str = ANSITextColours.red.as_str(str(owned)) + f"/{total}"
+
             table.rows.append(
                 (
                     k,
-                    f"{v[0]}",
-                    f" {v[1]}" if v[1] == v[0] else ANSITextColours.red.as_str(v[1]),
+                    owned_str,
                 )
             )
         table.rows.sort("Name", reverse=False)
@@ -336,31 +345,34 @@ class EconomyCommands(AdventureMixin):
     ):
         """[Owner] Adds a custom item to a specified member.
 
-        Item names containing spaces must be enclosed in double quotes. `[p]give item @locastan
-        "fine dagger" 1 att 1 charisma rare twohanded` will give a two handed .fine_dagger with 1
-        attack and 1 charisma to locastan. if a stat is not specified it will default to 0, order
-        does not matter.
+        Item names containing spaces must be enclosed in double quotes.
         available stats are:
-         - `attack` or `att`
-         - `charisma` or `diplo`
-         - `charisma` or `cha`
-         - `intelligence` or `int`
-         - `dexterity` or `dex`
-         - `luck`
-         - `rarity` (one of normal, rare, epic, legendary, set, forged, or event)
-         - `degrade` (Set to -1 to never degrade on rebirths)
-         - `level` (lvl)
-         - `slot` (one of `head`, `neck`, `chest`, `gloves`, `belt`, `legs`, `boots`, `left`, `right`
-         `ring`, `charm`, `twohanded`)
-
-        `[p]give item @locastan "fine dagger" 1 att 1 charisma -1 degrade 100 level rare twohanded`
+        - `attack:` or `att:` defaults to 0.
+        - `charisma:` or `diplo:` or `cha:` defaults to 0.
+        - `intelligence:` or `int:` defaults to 0.
+        - `dexterity:` or `dex:` defaults to 0.
+        - `luck:` defaults to 0.
+        - `rarity:` (one of `normal`, `rare`, `epic`, `legendary`, `set`, `forged`, or `event`) defaults to normal.
+        - `degrade:` (Set to -1 to never degrade on rebirths) defaults to 3.
+        - `level:` or `lvl:` defaults to the calculated level required based on stats.
+        - `slot:` (one of `head`, `neck`, `chest`, `gloves`, `belt`, `legs`, `boots`, `left`, `right`
+          `ring`, `charm`, `two handed`) defaults to left.
+        Example:
+        ```
+        [p]give item @locastan "fine dagger" att: 1 charisma: 1 degrade: -1 level: 100 rarity: rare slot: twohanded
+        ```
+        Will give locastan a 1 attack 1 charisma `.fine_dagger`.
         """
         if item_name.isnumeric():
             return await smart_embed(ctx, _("Item names cannot be numbers."))
         item_name = re.sub(r"[^\w ]", "", item_name)
         if user is None:
             user = ctx.author
-        new_item = {item_name: stats}
+        try:
+            new_item = {item_name: await stats.to_json(ctx)}
+        except commands.BadArgument as e:
+            await ctx.send(e)
+            return
         item = Item.from_json(ctx, new_item)
         async with self.get_lock(user):
             try:
@@ -370,14 +382,15 @@ class EconomyCommands(AdventureMixin):
                 return
             await c.add_to_backpack(item)
             await self.config.user(user).set(await c.to_json(ctx, self.config))
-        await ctx.send(
-            box(
-                _("An item named {item} has been created and placed in {author}'s backpack.").format(
-                    item=item, author=escape(user.display_name)
-                ),
-                lang="ansi",
-            )
+        item_table = item.table(c)
+        msg = box(
+            _("An item named {item} has been created and placed in {author}'s backpack.").format(
+                item=item, author=escape(user.display_name)
+            ),
+            lang="ansi",
         )
+        msg += box(str(item_table), lang="ansi")
+        await ctx.send(msg)
 
     @give.command(name="loot")
     async def _give_loot(
@@ -388,7 +401,9 @@ class EconomyCommands(AdventureMixin):
         number: int = 1,
     ):
         """[Owner] Give treasure chest(s) to all specified users."""
-
+        assert isinstance(loot_type, Rarities)
+        # this is here to make the typechecker not assume that some code is unreachable
+        # due to the way discord.py converters work not reporting the correct typehint returned
         users = users or [ctx.author]
         loot_types = [
             Rarities.normal,
@@ -403,7 +418,7 @@ class EconomyCommands(AdventureMixin):
                 ctx,
                 box(
                     ("Valid loot types: {loot_types}: " "ex. `{prefix}give loot normal @locastan` ").format(
-                        prefix=ctx.prefix, loot_types=humanize_list([i.ansi for i in loot_types])
+                        prefix=ctx.clean_prefix, loot_types=humanize_list([i.ansi for i in loot_types])
                     ),
                     lang="ansi",
                 ),

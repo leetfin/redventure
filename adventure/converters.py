@@ -100,11 +100,74 @@ class ArgParserFailure(UserFeedbackCheckFailure):
         super().__init__(message=message)
 
 
-class Stats(Converter):
-    """This will parse a string for specific keywords like attack and dexterity followed by a
-    number to create an item object to be added to a users inventory."""
+class RarityConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[Rarities]:
+        try:
+            rarity = Rarities.get_from_name(argument)
+        except KeyError:
+            raise BadArgument(
+                _("{rarity} is not a valid rarity, select one of {rarities}").format(
+                    rarity=argument, rarities=humanize_list([i.get_name() for i in Rarities if i.is_chest])
+                )
+            )
+        return rarity
 
-    async def convert(self, ctx: commands.Context, argument: str) -> Dict[str, int]:
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[Rarities]:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        choices = []
+        # cog = interaction.client.get_cog("Adventure")
+        log.debug(interaction.command)
+        for rarity in Rarities:
+            if rarity is Rarities.pet:
+                continue
+            if interaction.command and interaction.command.name in ["loot", "convert"] and not rarity.is_chest:
+                continue
+            if current.lower() in rarity.get_name().lower():
+                choices.append(Choice(name=rarity.get_name(), value=rarity.name))
+        return choices
+
+
+class SlotConverter(Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[Slot]:
+        if argument:
+            try:
+                return Slot.get_from_name(argument)
+            except ValueError:
+                raise BadArgument(
+                    _("{provided} is not a valid slot, select one of {slots}").format(
+                        provided=argument, slots=humanize_list([i.get_name() for i in Slot])
+                    )
+                )
+
+        return None
+
+    @classmethod
+    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[Slot]:
+        ctx = await interaction.client.get_context(interaction)
+        return await cls.convert(ctx, argument)
+
+    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
+        return [Choice(name=i.get_name(), value=i.name) for i in Slot if current.lower() in i.get_name().lower()]
+
+
+class Stats(commands.FlagConverter, case_insensitive=True):
+    attack: Optional[int] = commands.flag(name="att", aliases=["attack"], default=0)
+    charisma: Optional[int] = commands.flag(name="cha", aliases=["charisma", "diplomacy", "diplo"], default=0)
+    intelligence: Optional[int] = commands.flag(name="int", aliases=["intelligence"], default=0)
+    dexterity: Optional[int] = commands.flag(name="dex", aliases=["dexterity"], default=0)
+    luck: Optional[int] = commands.flag(name="luck", default=0)
+    rarity: Optional[Rarities] = commands.flag(name="rarity", default=Rarities.normal, converter=RarityConverter)
+    degrade: Optional[int] = commands.flag(name="degrade", aliases=["deg"], default=3)
+    level: Optional[int] = commands.flag(name="level", aliases=["lvl"], default=1)
+    slot: Optional[Slot] = commands.flag(name="slot", default=Slot.right, converter=SlotConverter)
+
+    async def to_json(self, ctx: commands.Context) -> Dict[str, Union[List[str], int, str]]:
         result = {
             "slot": ["left"],
             "att": 0,
@@ -116,36 +179,32 @@ class Stats(Converter):
             "degrade": 0,
             "lvl": 1,
         }
-        possible_stats = dict(
-            att=ATT.search(argument),
-            cha=CHA.search(argument),
-            int=INT.search(argument),
-            dex=DEX.search(argument),
-            luck=LUCK.search(argument),
-            degrade=DEG.search(argument),
-            lvl=LEVEL.search(argument),
-        )
-        try:
-            slot = [SLOT.search(argument).group(0)]
-            if slot == ["twohanded"]:
-                slot = ["left", "right"]
-            result["slot"] = slot
-        except AttributeError:
-            raise BadArgument(_("No slot position was provided."))
-        try:
-            rarity_re = "|".join(i.name for i in Rarities if i.value < Rarities.pet.value)
-            result["rarity"] = re.search(rarity_re, argument, flags=re.I).group(0)
-        except AttributeError:
-            raise BadArgument(_("No rarity was provided."))
+        possible_stats = {
+            "slot": self.slot.to_json() if self.slot else ["left"],
+            "att": self.attack,
+            "cha": self.charisma,
+            "int": self.intelligence,
+            "dex": self.dexterity,
+            "luck": self.luck,
+            "rarity": self.rarity.name if self.rarity else "normal",
+            "degrade": self.degrade,
+            "lvl": self.level,
+        }
         for key, value in possible_stats.items():
+            if key in ["slot", "rarity"]:
+                if key == "rarity" and value in ("pet", "forged"):
+                    raise BadArgument(_("How do you plan to create items with those rarities? Not creating item."))
+                result[key] = value
+                continue
             try:
-                stat = int(value.group(1))
+                stat = int(value)
                 if (
                     (key not in ["degrade", "lvl"] and stat > 10) or (key == "lvl" and stat < 50)
                 ) and not await ctx.bot.is_owner(ctx.author):
                     raise BadArgument(_("Don't you think that's a bit overpowered? Not creating item."))
-                result[key] = stat
+                result[key] = value
             except (AttributeError, ValueError):
+                result[key] = value
                 pass
         return result
 
@@ -300,7 +359,7 @@ class ItemConverter(Transformer):
             items = ""
             view = ConfirmItemView(60, lookup, ctx.author)
             for number, item in enumerate(lookup):
-                items += f"{number}. {str(item)} (owned {item.owned})\n"
+                items += f"{number}. {item.as_ansi()} (owned {item.owned})\n"
 
             await ctx.send(
                 _("Multiple items share that name, which one would you like?\n{items}").format(
@@ -625,62 +684,6 @@ class ThemeSetPetConverter(Converter):
         }
 
 
-class SlotConverter(Transformer):
-    @classmethod
-    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[Slot]:
-        if argument:
-            try:
-                return Slot.get_from_name(argument)
-            except ValueError:
-                raise BadArgument(
-                    _("{provided} is not a valid slot, select one of {slots}").format(
-                        provided=argument, slots=humanize_list([i.get_name() for i in Slot])
-                    )
-                )
-
-        return None
-
-    @classmethod
-    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[Slot]:
-        ctx = await interaction.client.get_context(interaction)
-        return await cls.convert(ctx, argument)
-
-    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
-        return [Choice(name=i.get_name(), value=i.name) for i in Slot if current.lower() in i.get_name().lower()]
-
-
-class RarityConverter(Transformer):
-    @classmethod
-    async def convert(cls, ctx: commands.Context, argument: str) -> Optional[Rarities]:
-        try:
-            rarity = Rarities.get_from_name(argument)
-        except KeyError:
-            raise BadArgument(
-                _("{rarity} is not a valid rarity, select one of {rarities}").format(
-                    rarity=argument, rarities=humanize_list([i.get_name() for i in Rarities if i.is_chest])
-                )
-            )
-        return rarity
-
-    @classmethod
-    async def transform(cls, interaction: discord.Interaction, argument: str) -> Optional[Rarities]:
-        ctx = await interaction.client.get_context(interaction)
-        return await cls.convert(ctx, argument)
-
-    async def autocomplete(self, interaction: discord.Interaction, current: str) -> List[Choice]:
-        choices = []
-        # cog = interaction.client.get_cog("Adventure")
-        log.debug(interaction.command)
-        for rarity in Rarities:
-            if rarity is Rarities.pet:
-                continue
-            if interaction.command and interaction.command.name in ["loot", "convert"] and not rarity.is_chest:
-                continue
-            if current.lower() in rarity.get_name().lower():
-                choices.append(Choice(name=rarity.get_name(), value=rarity.name))
-        return choices
-
-
 class SkillConverter(Transformer):
     @classmethod
     async def convert(cls, ctx: commands.Context, argument: str) -> Skills:
@@ -712,13 +715,15 @@ class SkillConverter(Transformer):
 
 class ChallengeConverter(Transformer):
     @classmethod
-    async def convert(cls, ctx: commands.Context, argument: str) -> str:
+    async def convert(cls, ctx: commands.Context, argument: str) -> Union[str, int]:
         if ctx.author.id not in (*ctx.bot.owner_ids, *DEV_LIST):
             return ""
+        if argument.isnumeric():
+            return int(argument)
         cog = ctx.bot.get_cog("Adventure")
         monsters, monster_stats, transcended = await cog.update_monster_roster()
         if argument not in monsters:
-            return ""
+            return int(argument, 16)
         return argument
 
     @classmethod
@@ -846,10 +851,12 @@ class BackpackFilterParser(commands.Converter):
         else:
             command = ""
         response = {}
-        set_names = set(SET_BONUSES.keys())
+        set_names = set(ctx.cog.SET_BONUSES.keys())
         parser = NoExitParser(description="Backpack Filter Parsing.", add_help=False)
         parser.add_argument("--str", dest="strength", nargs="+")
         parser.add_argument("--strength", dest="strength", nargs="+")
+        parser.add_argument("--att", dest="strength", nargs="+")
+        parser.add_argument("--attack", dest="strength", nargs="+")
 
         parser.add_argument("--intelligence", dest="intelligence", nargs="+")
         parser.add_argument("--int", dest="intelligence", nargs="+")

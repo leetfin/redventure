@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, MutableMapping, Optional, Union
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, MutableMapping, Optional, Tuple, Union
 
 import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 
 if TYPE_CHECKING:
+    from .adventureresult import AdventureResults
     from .adventureset import TaxesConverter
-    from .charsheet import BackpackFilterParser, Character, Item
+    from .charsheet import Character, Item
     from .constants import Rarities, Treasure
     from .converters import (
+        BackpackFilterParser,
         DayConverter,
         EquipableItemConverter,
         EquipmentConverter,
@@ -26,6 +29,8 @@ if TYPE_CHECKING:
         ThemeSetPetConverter,
     )
     from .game_session import GameSession
+    from .rng import Random
+    from .types import Monster
 
 
 class AdventureMixin(ABC):
@@ -38,7 +43,9 @@ class AdventureMixin(ABC):
     def __init__(self, *_args):
         self.config: Config
         self.bot: Red
+        self._adv_results: AdventureResults
         self.settings: Dict[Any, Any]
+        self.emojis: SimpleNamespace
         self._ready: asyncio.Event
         self._adventure_countdown: dict
         self._rewards: dict
@@ -132,15 +139,25 @@ class AdventureMixin(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def get_challenge(self, ctx: commands.Context, monsters):
+    async def get_challenge(self, monsters: Dict[str, Monster], rng: Random):
         raise NotImplementedError()
 
     @abstractmethod
-    async def update_monster_roster(self, ctx: commands.Context):
+    def _dynamic_monster_stats(self, choice: Monster, rng: Random) -> Monster:
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def update_monster_roster(
+        self, c: Optional[Character] = None, rng: Optional[Random] = None
+    ) -> Tuple[Dict[str, Monster], float, bool]:
         raise NotImplementedError()
 
     @abstractmethod
     async def _simple(self, ctx: commands.Context, adventure_msg, challenge: str = None, attribute: str = None):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def dispatch_adventure(self, session: GameSession, was_exposed: bool = False):
         raise NotImplementedError()
 
     @abstractmethod
@@ -432,12 +449,6 @@ class AdventureMixin(ABC):
 
     @abstractmethod
     async def stats(self, ctx: commands.Context, *, user: Union[discord.Member, discord.User] = None):
-        raise NotImplementedError()
-
-    @abstractmethod
-    async def _build_loadout_display(
-        self, ctx: commands.Context, userdata, loadout=True, rebirths: int = None, index: int = None
-    ):
         raise NotImplementedError()
 
     @abstractmethod

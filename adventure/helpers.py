@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import random
 import re
 import time
 from enum import Enum
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import discord
 from discord.ext.commands import CheckFailure
@@ -15,6 +17,9 @@ from .charsheet import Character, Item
 from .constants import DEV_LIST, Rarities
 
 _ = Translator("Adventure", __file__)
+
+if TYPE_CHECKING:
+    from .abc import AdventureMixin
 
 
 async def _get_epoch(seconds: int):
@@ -33,7 +38,7 @@ async def smart_embed(
     success: Optional[bool] = None,
     image: Optional[str] = None,
     ephemeral: bool = False,
-    cog: Optional[Cog] = None,
+    cog: Optional[AdventureMixin] = None,
     interaction: Optional[discord.Interaction] = None,
     view: Optional[discord.ui.View] = discord.utils.MISSING,
     embed_colour: Optional[str] = None,
@@ -90,7 +95,7 @@ async def smart_embed(
 
 
 def check_running_adventure(ctx):
-    for (guild_id, session) in ctx.bot.get_cog("Adventure")._sessions.items():
+    for guild_id, session in ctx.bot.get_cog("Adventure")._sessions.items():
         user_ids: list = []
         options = ["fight", "magic", "talk", "pray", "run"]
         for i in options:
@@ -164,10 +169,19 @@ def has_separated_economy():
 
 
 class ConfirmView(discord.ui.View):
-    def __init__(self, timeout: float, author: Union[discord.User, discord.Member]):
+    def __init__(self, timeout: float, author: Union[discord.User, discord.Member], *, get_name: bool = False):
         super().__init__(timeout=timeout)
         self.confirmed = None
         self.author = author
+        self.message: Optional[discord.Message] = None
+        self.name_button = ForgeNameButton()
+        self.item_name = None
+        if get_name:
+            self.add_item(self.name_button)
+
+    async def on_timeout(self):
+        if self.message:
+            await self.message.edit(view=None)
 
     @discord.ui.button(label=_("Yes"), style=discord.ButtonStyle.green)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -186,6 +200,32 @@ class ConfirmView(discord.ui.View):
             await interaction.response.send_message(_("You are not authorized to interact with this."), ephemeral=True)
             return False
         return True
+
+
+class NameModal(discord.ui.Modal):
+    def __init__(self, view: discord.ui.View):
+        super().__init__(title=_("Name your new item"))
+        self.name = discord.ui.TextInput(
+            label=_("Item Name"),
+            max_length=40,
+            placeholder=_("Enter the new item's name"),
+        )
+        self.add_item(self.name)
+        self.view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        self.view.item_name = self.name.value
+        self.view.confirmed = True
+        self.view.stop()
+
+
+class ForgeNameButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(style=discord.ButtonStyle.green, label=_("Change Name"), row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(NameModal(self.view))
 
 
 class LootSellEnum(Enum):

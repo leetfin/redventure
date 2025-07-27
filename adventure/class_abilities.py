@@ -4,8 +4,7 @@ import contextlib
 import logging
 import random
 import time
-from math import ceil
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import discord
 from discord.ext.commands.errors import BadArgument
@@ -20,7 +19,7 @@ from .charsheet import Character, Item
 from .constants import HeroClasses, Rarities, Slot
 from .converters import HeroClassConverter, ItemConverter
 from .helpers import ConfirmView, escape, is_dev, smart_embed
-from .menus import BaseMenu, SimpleSource
+from .menus import BackpackMenu, BackpackSource
 
 _ = Translator("Adventure", __file__)
 
@@ -51,7 +50,7 @@ class ClassAbilities(AdventureMixin):
         if clz is None:
             ctx.command.reset_cooldown(ctx)
             classes = box(
-                "\n".join(c.class_colour.as_str(c.class_name) for c in HeroClasses),
+                "\n".join(c.class_colour.as_str(c.class_name) for c in HeroClasses if c is not HeroClasses.hero),
                 lang="ansi",
             )
             await smart_embed(
@@ -60,7 +59,7 @@ class ClassAbilities(AdventureMixin):
                     "So you feel like taking on a class, {author}?\n"
                     "Available classes are: {classes}\n"
                     "Use `{prefix}heroclass name-of-class` to choose one."
-                ).format(author=bold(ctx.author.display_name), classes=classes, prefix=ctx.prefix),
+                ).format(author=bold(ctx.author.display_name), classes=classes, prefix=ctx.clean_prefix),
             )
 
         else:
@@ -181,7 +180,9 @@ class ClassAbilities(AdventureMixin):
                                 if tinker_wep:
                                     await class_msg.edit(
                                         content=box(
-                                            _("{} has run off to find a new master.").format(humanize_list(tinker_wep)),
+                                            _("{} has run off to find a new master.").format(
+                                                humanize_list([i.as_ansi() for i in tinker_wep])
+                                            ),
                                             lang="ansi",
                                         ),
                                         view=None,
@@ -280,7 +281,7 @@ class ClassAbilities(AdventureMixin):
                     return await ctx.send(
                         box(
                             _("{author}, you already have a pet. Try foraging ({prefix}pet forage).").format(
-                                author=escape(ctx.author.display_name), prefix=ctx.prefix
+                                author=escape(ctx.author.display_name), prefix=ctx.clean_prefix
                             ),
                             lang="ansi",
                         )
@@ -436,16 +437,14 @@ class ClassAbilities(AdventureMixin):
             if "cooldown" not in c.heroclass:
                 c.heroclass["cooldown"] = cooldown_time + 1
             if c.heroclass["cooldown"] <= time.time():
-                await self._open_chest(ctx, c.heroclass["pet"]["name"], Rarities.pet, character=c)
+                await self._open_chest(ctx, ctx.author, Rarities.pet, character=c)
                 c.heroclass["cooldown"] = time.time() + cooldown_time
                 await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
             else:
-                cooldown_time = c.heroclass["cooldown"] - time.time()
+                cooldown_time = int(c.heroclass["cooldown"])
                 return await smart_embed(
                     ctx,
-                    _("This command is on cooldown. Try again in {}.").format(
-                        humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                    ),
+                    _("This command is on cooldown. Try again in {}.").format(f"<t:{cooldown_time}:R>"),
                 )
 
     @pet.command(name="free")
@@ -513,16 +512,14 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                 else:
-                    cooldown_time = c.heroclass["cooldown"] - time.time()
+                    cooldown_time = int(c.heroclass["cooldown"])
                     return await smart_embed(
                         ctx,
                         _(
                             "Your hero is currently recovering from the last time "
                             "they used this skill or they have just changed their heroclass. "
                             "Try again in {}."
-                        ).format(
-                            humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                        ),
+                        ).format(f"<t:{cooldown_time}:R>"),
                     )
 
     @commands.hybrid_command()
@@ -562,7 +559,7 @@ class ClassAbilities(AdventureMixin):
             cooldown_time = max(300, (900 - max((c.luck + c.total_cha) * 2, 0)))
             if "cooldown" not in c.heroclass:
                 c.heroclass["cooldown"] = cooldown_time + 1
-            if c.heroclass["cooldown"] + cooldown_time <= time.time():
+            if c.heroclass["cooldown"] <= time.time():
                 max_roll = 100 if c.rebirths >= 30 else 50 if c.rebirths >= 15 else 20
                 roll = random.randint(min(c.rebirths - 25 // 2, (max_roll // 2)), max_roll) / max_roll
                 if ctx.guild.id in self._sessions and self._sessions[ctx.guild.id].insight[0] < roll:
@@ -572,7 +569,7 @@ class ClassAbilities(AdventureMixin):
                     good = False
                     await smart_embed(ctx, _("Another hero has already done a better job than you."))
                 c.heroclass["ability"] = True
-                c.heroclass["cooldown"] = time.time()
+                c.heroclass["cooldown"] = time.time() + cooldown_time
                 async with self.get_lock(c.user):
                     await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                     if good:
@@ -583,8 +580,10 @@ class ClassAbilities(AdventureMixin):
                                 skill=self.emojis.skills.psychic,
                             ),
                         )
+                session = self._sessions[ctx.guild.id]
+                was_exposed = not session.exposed
                 if good:
-                    session = self._sessions[ctx.guild.id]
+
                     if roll <= 0.4:
                         return await smart_embed(ctx, _("You suck."))
                     msg = ""
@@ -596,7 +595,7 @@ class ClassAbilities(AdventureMixin):
                         mdef = session.monster_modified_stats["mdef"]
                         cdef = session.monster_modified_stats.get("cdef", 1.0)
                         hp = session.monster_modified_stats["hp"]
-                        diplo = session.monster_modified_stats["dipl"]
+                        dipl = session.monster_modified_stats["dipl"]
                         choice = random.choice(["physical", "magic", "diplomacy"])
                         if choice == "physical":
                             physical_roll = 0.4
@@ -612,8 +611,8 @@ class ClassAbilities(AdventureMixin):
                             diplo_roll = 0.4
 
                         if roll == 1:
-                            hp = int(hp * self.ATTRIBS[session.attribute][0] * session.monster_stats)
-                            dipl = int(diplo * self.ATTRIBS[session.attribute][1] * session.monster_stats)
+                            hp = session.monster_hp()
+                            dipl = session.monster_dipl()
                             msg += _(
                                 "This monster is **a{attr} {challenge}** ({hp_symbol} {hp}/{dipl_symbol} {dipl}){trans}.\n"
                             ).format(
@@ -629,8 +628,8 @@ class ClassAbilities(AdventureMixin):
                             )
                             self._sessions[ctx.guild.id].exposed = True
                         elif roll >= 0.95:
-                            hp = hp * self.ATTRIBS[session.attribute][0] * session.monster_stats
-                            dipl = diplo * self.ATTRIBS[session.attribute][1] * session.monster_stats
+                            hp = session.monster_hp()
+                            dipl = session.monster_dipl()
                             msg += _(
                                 "This monster is **a{attr} {challenge}** ({hp_symbol} {hp}/{dipl_symbol} {dipl}).\n"
                             ).format(
@@ -643,7 +642,7 @@ class ClassAbilities(AdventureMixin):
                             )
                             self._sessions[ctx.guild.id].exposed = True
                         elif roll >= 0.90:
-                            hp = hp * self.ATTRIBS[session.attribute][0] * session.monster_stats
+                            hp = session.monster_hp()
                             msg += _("This monster is **a{attr} {challenge}** ({hp_symbol} {hp}).\n").format(
                                 challenge=session.challenge,
                                 attr=session.attribute,
@@ -703,7 +702,10 @@ class ClassAbilities(AdventureMixin):
                         image = None
                         if roll >= 0.4 and not session.no_monster:
                             image = session.monster["image"]
-                        return await smart_embed(ctx, msg, image=image)
+                        response_msg = await smart_embed(ctx, msg, image=image)
+                        if session.exposed and not session.easy_mode:
+                            self.dispatch_adventure(session, was_exposed=was_exposed)
+                        return response_msg
                     else:
                         return await smart_embed(ctx, _("You have failed to discover anything about this monster."))
             else:
@@ -714,9 +716,7 @@ class ClassAbilities(AdventureMixin):
                         "Your hero is currently recovering from the last time "
                         "they used this skill or they have just changed their heroclass. "
                         "Try again in {}."
-                    ).format(
-                        humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                    ),
+                    ).format(f"<t:{cooldown_time}:R>"),
                 )
 
     @commands.hybrid_command()
@@ -758,16 +758,14 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                 else:
-                    cooldown_time = c.heroclass["cooldown"] - time.time()
+                    cooldown_time = int(c.heroclass["cooldown"])
                     return await smart_embed(
                         ctx,
                         _(
                             "Your hero is currently recovering from the last time "
                             "they used this skill or they have just changed their heroclass. "
                             "Try again in {}."
-                        ).format(
-                            humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                        ),
+                        ).format(f"<t:{cooldown_time}:R>"),
                     )
 
     @commands.hybrid_command()
@@ -810,15 +808,13 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                 else:
-                    cooldown_time = c.heroclass["cooldown"] - time.time()
+                    cooldown_time = int(c.heroclass["cooldown"])
                     return await smart_embed(
                         ctx,
                         _(
                             "Your hero is currently recovering from the "
                             "last time they used this skill. Try again in {}."
-                        ).format(
-                            humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                        ),
+                        ).format(f"<t:{cooldown_time}:R>"),
                     )
 
     @commands.hybrid_command()
@@ -859,16 +855,14 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                 else:
-                    cooldown_time = c.heroclass["cooldown"] - time.time()
+                    cooldown_time = int(c.heroclass["cooldown"])
                     return await smart_embed(
                         ctx,
                         _(
                             "Your hero is currently recovering from the last time "
                             "they used this skill or they have just changed their heroclass. "
                             "Try again in {}."
-                        ).format(
-                            humanize_timedelta(seconds=int(cooldown_time)) if int(cooldown_time) >= 1 else _("1 second")
-                        ),
+                        ).format(f"<t:{cooldown_time}:R>"),
                     )
 
     @commands.max_concurrency(1, per=commands.BucketType.user)
@@ -899,17 +893,15 @@ class ClassAbilities(AdventureMixin):
                 if "cooldown" not in c.heroclass:
                     c.heroclass["cooldown"] = cooldown_time + 1
                 if c.heroclass["cooldown"] > time.time():
-                    cooldown_time = c.heroclass["cooldown"] - time.time()
+                    cooldown_time = int(c.heroclass["cooldown"])
                     return await smart_embed(
                         ctx,
-                        _("This command is on cooldown. Try again in {}").format(
-                            humanize_timedelta(seconds=int(cooldown_time)) if cooldown_time >= 1 else _("1 second")
-                        ),
+                        _("This command is on cooldown. Try again in {}").format(f"<t:{cooldown_time}:R>"),
                     )
                 ascended_forge_msg = ""
-                ignored_rarities = [Rarities.forged, Rarities.set, Rarities.event]
+                ignored_rarities = {Rarities.forged, Rarities.set, Rarities.event}
                 if c.rebirths < 30:
-                    ignored_rarities.append(Rarities.ascended)
+                    ignored_rarities.add(Rarities.ascended)
                     ascended_forge_msg += _("\n\nAscended items will be forgeable after 30 rebirths.")
                 consumed = []
                 forgeables_items = [str(i) for n, i in c.backpack.items() if i.rarity not in ignored_rarities]
@@ -929,120 +921,33 @@ class ClassAbilities(AdventureMixin):
                         ),
                     )
                     return
-                await BaseMenu(
-                    source=SimpleSource(pages),
+                menu = BackpackMenu(
+                    source=BackpackSource(pages),
+                    cog=self,
+                    help_command=self.forge,
                     delete_message_after=True,
                     clear_reactions_after=True,
                     timeout=180,
-                ).start(ctx=ctx)
-                await smart_embed(
-                    ctx,
-                    _(
-                        "Reply with the full or partial name of item 1 to select for forging. "
-                        "Try to be specific. (Say `cancel` to exit){}".format(ascended_forge_msg)
-                    ),
+                    tinker_forge=True,
                 )
-                try:
-                    item = None
-                    while not item:
-                        reply = await ctx.bot.wait_for(
-                            "message",
-                            check=MessagePredicate.same_context(user=ctx.author),
-                            timeout=30,
-                        )
-                        new_ctx = await self.bot.get_context(reply)
-                        new_ctx.command = self.forge
-                        if reply.content.lower() in ["cancel", "exit"]:
-                            return await smart_embed(ctx, _("Forging process has been cancelled."))
-                        with contextlib.suppress(BadArgument):
-                            item = None
-                            item = await ItemConverter().convert(new_ctx, reply.content)
-                            if str(item) not in forgeables_items:
-                                item = None
-
-                        if not item:
-                            wrong_item = _("{c}, I could not find that item - check your spelling.").format(
-                                c=bold(ctx.author.display_name)
-                            )
-                            await smart_embed(ctx, wrong_item)
-                        elif not c.can_equip(item):
-                            wrong_item = _("{c}, this item is too high level for you to reforge it.").format(
-                                c=bold(ctx.author.display_name)
-                            )
-                            await smart_embed(ctx, wrong_item)
-                            item = None
-                            continue
-                        else:
-                            break
-                    consumed.append(item)
-                except asyncio.TimeoutError:
+                await menu.start(ctx=ctx)
+                await menu.wait()
+                await menu.message.edit(view=None)
+                consumed = menu.selected_items
+                if not consumed:
                     timeout_msg = _("I don't have all day you know, {}.").format(bold(ctx.author.display_name))
                     return await smart_embed(ctx, timeout_msg)
-                if item.rarity in [Rarities.forged, Rarities.set]:
-                    return await smart_embed(
-                        ctx,
-                        _("{c}, {item.rarity} items cannot be reforged.").format(
-                            c=bold(ctx.author.display_name), item=item
-                        ),
-                    )
-                await smart_embed(
-                    ctx,
-                    _(
-                        "Reply with the full or partial name of item 2 to select for forging. "
-                        "Try to be specific. (Say `cancel` to exit)"
-                    ),
-                )
-                try:
-                    item = None
-                    while not item:
-                        reply = await ctx.bot.wait_for(
-                            "message",
-                            check=MessagePredicate.same_context(user=ctx.author),
-                            timeout=30,
-                        )
-                        if reply.content.lower() in ["cancel", "exit"]:
-                            return await smart_embed(ctx, _("Forging process has been cancelled."))
-                        new_ctx = await self.bot.get_context(reply)
-                        new_ctx.command = self.forge
-                        with contextlib.suppress(BadArgument):
-                            item = None
-                            item = await ItemConverter().convert(new_ctx, reply.content)
-                            if str(item) not in forgeables_items:
-                                item = None
-                        if item and consumed[0].owned <= 1 and str(consumed[0]) == str(item):
-                            wrong_item = _(
-                                "{c}, you only own 1 copy of this item and you've already selected it."
-                            ).format(c=bold(ctx.author.display_name))
-                            await smart_embed(ctx, wrong_item)
-
-                            continue
-                        if not item:
-                            wrong_item = _("{c}, I could not find that item - check your spelling.").format(
-                                c=bold(ctx.author.display_name)
-                            )
-                            await smart_embed(ctx, wrong_item)
-                        elif not c.can_equip(item):
-                            wrong_item = _("{c}, this item is too high level for you to reforge it.").format(
-                                c=bold(ctx.author.display_name)
-                            )
-                            await smart_embed(ctx, wrong_item)
-                            item = None
-                            continue
-                        else:
-                            break
-                    consumed.append(item)
-                except asyncio.TimeoutError:
-                    timeout_msg = _("I don't have all day you know, {}.").format(bold(ctx.author.display_name))
-                    return await smart_embed(ctx, timeout_msg)
-                if item.rarity in [Rarities.forged, Rarities.set]:
-                    return await smart_embed(
-                        ctx,
-                        _("{c}, {item.rarity} items cannot be reforged.").format(
-                            c=bold(ctx.author.display_name), item=item
-                        ),
-                    )
-                newitem = await self._to_forge(ctx, consumed, c)
+                newitem, roll = await self._to_forge(ctx, consumed, c)
                 for x in consumed:
+                    if x.name not in c.backpack:
+                        return await smart_embed(
+                            message=box(
+                                _(
+                                    "I don't know what you're playing at but {item} is no longer in your backpack."
+                                ).format(item=x.as_ansi()),
+                                lang="ansi",
+                            )
+                        )
                     c.backpack[x.name].owned -= 1
                     if c.backpack[x.name].owned <= 0:
                         del c.backpack[x.name]
@@ -1052,32 +957,37 @@ class ClassAbilities(AdventureMixin):
                     if item.rarity is Rarities.forged:
                         c = await c.unequip_item(item)
                 lookup = list(i for n, i in c.backpack.items() if i.rarity is Rarities.forged)
+                msg = _(
+                    "{author}, your forging roll was {dice}({roll}).\nThe device you tinkered will have the following stats.\n"
+                ).format(author=escape(ctx.author.display_name), dice=self.emojis.dice, roll=roll)
+
+                msg += box(str(newitem.table(c)), lang="ansi")
                 if len(lookup) > 0:
-                    forge_str = box(
+                    msg += box(
                         _("{author}, you already have a device. Do you want to replace {replace}?").format(
                             author=escape(ctx.author.display_name),
-                            replace=", ".join([str(x) for x in lookup]),
+                            replace=", ".join([x.as_ansi() for x in lookup]),
                         ),
                         lang="ansi",
                     )
-                    view = ConfirmView(60, ctx.author)
-                    forge_msg = await ctx.send(forge_str, view=view)
+                    view = ConfirmView(60, ctx.author, get_name=True)
+                    view.message = await ctx.send(msg, view=view)
                     await view.wait()
-                    with contextlib.suppress(discord.HTTPException):
-                        await forge_msg.delete()
+                    if view.item_name is not None:
+                        newitem.name = view.item_name
                     if view.confirmed:  # user reacted with Yes.
                         c.heroclass["cooldown"] = time.time() + cooldown_time
                         created_item = box(
                             _("{author}, your new {newitem} consumed {lk} and is now lurking in your backpack.").format(
                                 author=escape(ctx.author.display_name),
-                                newitem=newitem,
-                                lk=", ".join([str(x) for x in lookup]),
+                                newitem=newitem.as_ansi(),
+                                lk=", ".join([x.as_ansi() for x in lookup]),
                             ),
                             lang="ansi",
                         )
                         for item in lookup:
                             del c.backpack[item.name]
-                        await ctx.send(created_item)
+                        await view.message.edit(content=created_item, view=None)
                         c.backpack[newitem.name] = newitem
                         await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                     else:
@@ -1085,37 +995,112 @@ class ClassAbilities(AdventureMixin):
                         await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
                         mad_forge = box(
                             _("{author}, {newitem} got mad at your rejection and blew itself up.").format(
-                                author=escape(ctx.author.display_name), newitem=newitem
+                                author=escape(ctx.author.display_name), newitem=newitem.as_ansi()
                             ),
                             lang="ansi",
                         )
-                        return await ctx.send(mad_forge)
+                        return await view.message.edit(content=mad_forge, view=None)
                 else:
-                    c.heroclass["cooldown"] = time.time() + cooldown_time
-                    c.backpack[newitem.name] = newitem
-                    await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
-                    forged_item = box(
-                        _("{author}, your new {newitem} is lurking in your backpack.").format(
-                            author=escape(ctx.author.display_name), newitem=newitem
-                        ),
-                        lang="ansi",
-                    )
-                    await ctx.send(forged_item)
+                    msg += _("Do you want to keep this item?")
+                    view = ConfirmView(60, ctx.author, get_name=True)
+                    view.message = await ctx.send(msg, view=view)
+                    await view.wait()
+                    if view.item_name is not None:
+                        newitem.name = view.item_name
+                    if view.confirmed:
+                        c.heroclass["cooldown"] = time.time() + cooldown_time
+                        c.backpack[newitem.name] = newitem
+                        await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
+                        forged_item = box(
+                            _("{author}, your new {newitem} is lurking in your backpack.").format(
+                                author=escape(ctx.author.display_name), newitem=newitem.as_ansi()
+                            ),
+                            lang="ansi",
+                        )
+                        await view.message.edit(content=forged_item, view=None)
+                    else:
+                        c.heroclass["cooldown"] = time.time() + cooldown_time
+                        await self.config.user(ctx.author).set(await c.to_json(ctx, self.config))
+                        mad_forge = box(
+                            _("{author}, {newitem} got mad at your rejection and blew itself up.").format(
+                                author=escape(ctx.author.display_name), newitem=newitem.as_ansi()
+                            ),
+                            lang="ansi",
+                        )
+                        return await view.message.edit(content=mad_forge, view=None)
 
-    async def _to_forge(self, ctx: commands.Context, consumed, character):
+    async def get_forge_items(self, ctx: commands.Context, c: Character):
+        ascended_forge_msg = ""
+        ignored_rarities = [Rarities.forged, Rarities.set, Rarities.event]
+        if c.rebirths < 30:
+            ignored_rarities.append(Rarities.ascended)
+            ascended_forge_msg += _("\n\nAscended items will be forgeable after 30 rebirths.")
+        consumed = []
+        forgeables_items = [str(i) for n, i in c.backpack.items() if i.rarity not in ignored_rarities]
+        await smart_embed(
+            ctx,
+            _(
+                "Reply with the full or partial name of item 1 to select for forging. "
+                "Try to be specific. (Say `cancel` to exit){}".format(ascended_forge_msg)
+            ),
+        )
+        consumed = []
+        try:
+            item = None
+            while len(consumed) < 2:
+                reply = await ctx.bot.wait_for(
+                    "message",
+                    check=MessagePredicate.same_context(user=ctx.author),
+                    timeout=30,
+                )
+                new_ctx = await self.bot.get_context(reply)
+                new_ctx.command = self.forge
+                if reply.content.lower() in ["cancel", "exit"]:
+                    return await smart_embed(ctx, _("Forging process has been cancelled."))
+                with contextlib.suppress(BadArgument):
+                    item = None
+                    item = await ItemConverter().convert(new_ctx, reply.content)
+                    if str(item) not in forgeables_items:
+                        item = None
+
+                if not item:
+                    wrong_item = _("{c}, I could not find that item - check your spelling.").format(
+                        c=bold(ctx.author.display_name)
+                    )
+                    await smart_embed(ctx, wrong_item)
+                elif not c.can_equip(item):
+                    wrong_item = _("{c}, this item is too high level for you to reforge it.").format(
+                        c=bold(ctx.author.display_name)
+                    )
+                    await smart_embed(ctx, wrong_item)
+                    item = None
+                    continue
+                else:
+                    break
+            consumed.append(item)
+        except asyncio.TimeoutError:
+            timeout_msg = _("I don't have all day you know, {}.").format(bold(ctx.author.display_name))
+            return await smart_embed(ctx, timeout_msg)
+        if item.rarity in [Rarities.forged, Rarities.set]:
+            return await smart_embed(
+                ctx,
+                _("{c}, {item.rarity} items cannot be reforged.").format(c=bold(ctx.author.display_name), item=item),
+            )
+
+    async def _to_forge(self, ctx: commands.Context, consumed: List[Item], character: Character):
         item1 = consumed[0]
         item2 = consumed[1]
 
         roll = random.randint(1, 20)
-        modifier = (roll / 20) + 0.3
+        modifier = (roll / 20) + 0.75
         base_cha = max(character._cha, 1)
         base_int = character._int
         base_luck = character._luck
         base_att = max(character._att, 1)
-        modifier_bonus_luck = 0.01 * base_luck // 10
-        modifier_bonus_int = 0.01 * base_int // 20
-        modifier_penalty_str = 0.01 * base_att // 20
-        modifier_penalty_cha = 0.01 * base_cha // 20
+        modifier_bonus_luck = 0.01 * (base_luck // 10)
+        modifier_bonus_int = 0.01 * (base_int // 20)
+        modifier_penalty_str = 0.01 * (base_att // 20)
+        modifier_penalty_cha = 0.01 * (base_cha // 20)
         modifier = sum([modifier_bonus_int, modifier_bonus_luck, modifier_penalty_cha, modifier_penalty_str, modifier])
         modifier = max(0.001, modifier)
 
@@ -1131,85 +1116,8 @@ class ClassAbilities(AdventureMixin):
         newluck = int((base_luck * modifier) + base_luck)
         newslot = random.choice([i for i in Slot])
 
-        if newslot is Slot.two_handed:  # two handed weapons add their bonuses twice
-            hand = "two handed"
-        else:
-            if newslot is Slot.right or newslot is Slot.left:
-                hand = newslot.get_name() + " handed"
-            else:
-                hand = newslot.get_name() + " slot"
-        if newslot is Slot.two_handed:
-            two_handed_msg = box(
-                _(
-                    "{author}, your forging roll was {dice}({roll}).\n"
-                    "The device you tinkered will have "
-                    "(ATT {new_att} | "
-                    "CHA {new_cha} | "
-                    "INT {new_int} | "
-                    "DEX {new_dex} | "
-                    "LUCK {new_luck})"
-                    " and be {hand}."
-                ).format(
-                    author=escape(ctx.author.display_name),
-                    roll=roll,
-                    dice=self.emojis.dice,
-                    new_att=(newatt * 2),
-                    new_cha=(newdip * 2),
-                    new_int=(newint * 2),
-                    new_dex=(newdex * 2),
-                    new_luck=(newluck * 2),
-                    hand=hand,
-                ),
-                lang="ansi",
-            )
-            await ctx.send(two_handed_msg)
-        else:
-            reg_item = box(
-                _(
-                    "{author}, your forging roll was {dice}({roll}).\n"
-                    "The device you tinkered will have "
-                    "(ATT {new_att} | "
-                    "CHA {new_dip} | "
-                    "INT {new_int} | "
-                    "DEX {new_dex} | "
-                    "LUCK {new_luck})"
-                    " and be {hand}."
-                ).format(
-                    author=escape(ctx.author.display_name),
-                    roll=roll,
-                    dice=self.emojis.dice,
-                    new_att=newatt,
-                    new_dip=newdip,
-                    new_int=newint,
-                    new_dex=newdex,
-                    new_luck=newluck,
-                    hand=hand,
-                ),
-                lang="ansi",
-            )
-            await ctx.send(reg_item)
-        get_name = _(
-            "{}, please respond with "
-            "a name for your creation within 30s.\n"
-            "(You will not be able to change it afterwards. 40 characters maximum.)"
-        ).format(bold(ctx.author.display_name))
-        await smart_embed(ctx, get_name)
-        reply = None
-        name = _("Unnamed Artifact")
-        try:
-            reply = await ctx.bot.wait_for("message", check=MessagePredicate.same_context(user=ctx.author), timeout=30)
-        except asyncio.TimeoutError:
-            name = _("Unnamed Artifact")
-        if reply is None:
-            name = _("Unnamed Artifact")
-        else:
-            if hasattr(reply, "content"):
-                if len(reply.content) > 40:
-                    name = _("Long-winded Artifact")
-                else:
-                    name = reply.content.lower()
         item = {
-            name: {
+            _("Unnamed Artifact"): {
                 "slot": newslot.to_json(),
                 "att": newatt,
                 "cha": newdip,
@@ -1220,4 +1128,5 @@ class ClassAbilities(AdventureMixin):
             }
         }
         item = Item.from_json(ctx, item)
-        return item
+
+        return item, roll
